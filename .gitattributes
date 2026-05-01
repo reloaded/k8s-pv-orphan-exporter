@@ -1,0 +1,27 @@
+# Default: let git auto-detect text vs binary, normalize line endings to LF on checkin
+* text=auto eol=lf
+
+# Source files: always LF, regardless of platform
+*.go      text eol=lf
+*.sh      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.md      text eol=lf
+*.toml    text eol=lf
+Dockerfile text eol=lf
+Makefile  text eol=lf
+
+# Generated Go files — mark for diff suppression
+*.pb.go   linguist-generated=true
+*_mock.go linguist-generated=true
+
+# Treat go.sum as generated for diff readability (still checked in)
+go.sum    linguist-generated=true
+
+# Binary assets
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
