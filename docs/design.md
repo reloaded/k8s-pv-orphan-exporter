@@ -437,7 +437,9 @@ correlate `nodeAffinity` selectors with the actual node name.
 - Helm chart under `charts/k8s-pv-orphan-exporter/`.
 - Example Grafana dashboard JSON.
 - Prometheus alerting rules under `deploy/prometheus-rules.yaml`.
-- Multi-arch container images (linux/amd64, linux/arm64) via GitHub Actions.
+- Multi-arch container images (`linux/amd64`, `linux/arm64`) published to
+  `ghcr.io/reloaded/k8s-pv-orphan-exporter` via GitHub Actions. Tag scheme:
+  `latest` for `main`, `vX.Y.Z` for tagged releases, `sha-<short>` per push.
 - Goreleaser config for tagged releases.
 
 ### Phase 5 (roadmap, not committed)
