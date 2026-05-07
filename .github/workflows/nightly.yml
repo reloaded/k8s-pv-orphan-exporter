@@ -1,0 +1,49 @@
+# Nightly: more rigorous test pass than PR CI.
+#
+# Runs daily at 06:00 UTC and on demand via workflow_dispatch.
+# `unit` repeats the PR test invocation but with -count=2 to flush
+# out flakes. `integration` runs the same suite with -tags=integration
+# so test files gated behind that build tag are exercised — Phase 1
+# has none, but Phase 2 wires the kind-based local-path tests there
+# and they will start running automatically.
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go test -race -count=2 -coverprofile=coverage.out ./...
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-coverage
+          path: coverage.out
+          if-no-files-found: ignore
+
+  integration:
+    name: integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go test -race -tags=integration -count=1 ./...

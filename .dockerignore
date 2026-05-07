@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+.devcontainer
+.vscode
+docs
+*.md
+LICENSE
+.gitignore
+.gitattributes
+.golangci.yml
+Dockerfile
+.dockerignore
