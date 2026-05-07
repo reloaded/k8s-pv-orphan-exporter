@@ -8,14 +8,14 @@ See [`docs/design.md`](docs/design.md) for the full design and architecture.
 
 ## Project metadata
 
-- **Go module path:** `github.com/reloaded/k8s-pv-orphan-exporter` (use this in `go.mod` when Phase 1 lands).
+- **Go module path:** `github.com/reloaded/k8s-pv-orphan-exporter`.
 - **License:** Apache-2.0. See [`LICENSE`](LICENSE). New source files should carry the standard short Apache-2.0 header.
 - **Container images:** published to `ghcr.io/reloaded/k8s-pv-orphan-exporter`. Tags: `latest` for `main`, `vX.Y.Z` for tagged releases, `sha-<short>` for every push.
 - **Default repo branch:** `main`.
 
 ## Current state of the repo
 
-What is in the repo today (as of this PR landing on `main`):
+What is in the repo today:
 
 - Devcontainer (`.devcontainer/`) — Go toolchain + supporting CLI tools.
 - Agent guidance (`CLAUDE.md` — this file).
@@ -23,20 +23,26 @@ What is in the repo today (as of this PR landing on `main`):
 - v0 architecture and phased implementation plan (`docs/design.md`).
 - License (`LICENSE`), `.gitignore`, `.gitattributes`, `.vscode/`.
 - A short `README.md` with a "Getting started" section.
+- **Phase 1 skeleton:**
+  - `go.mod` / `go.sum` (module path `github.com/reloaded/k8s-pv-orphan-exporter`).
+  - `cmd/k8s-pv-orphan-exporter/` — `main` with flag parsing and `/metrics` server.
+  - `internal/{version,inventory,scanner,scanner/localpath,diff,metrics,k8s}/` packages.
+  - The `LocalPathScanner` is a stub — it returns hardcoded data; the real walker lands in Phase 2.
+  - Operational metrics (`build_info`, `up`, `scan_duration_seconds`, `scan_errors_total`, `last_scan_timestamp_seconds`, `pv_inventory_size`).
+  - Diff engine with table-driven tests in `internal/diff/`.
+  - `Dockerfile` (multi-stage, distroless runtime).
 
 What is **not** here yet (do not assume any of this exists — it is on the roadmap in `docs/design.md`):
 
-- No `go.mod` / `go.sum` / `vendor/` — no Go code at all.
-- No `cmd/` or `internal/` packages.
-- No Dockerfile or container build.
+- No real disk-walking scanner — Phase 2.
+- No NFS scanner — Phase 3.
 - No Helm chart, no Kubernetes manifests, no `deploy/`.
 - No CI workflows under `.github/workflows/`.
 - No `Makefile` or `taskfile`.
-- No `golangci.yml` lint config.
-- No tests, no testdata.
+- No `.golangci.yml` lint config.
 - No Prometheus alerting rules, no Grafana dashboards.
 
-When starting a task, the **first thing to do** is read `docs/design.md` and pick the lowest-numbered phase whose work is not yet done. Phase 1 (Go module skeleton) is the obvious starting point.
+When starting a task, the **first thing to do** is read `docs/design.md` and pick the lowest-numbered phase whose work is not yet done. With Phase 1 landed, Phase 2 (real `LocalPathScanner` walker) is the obvious next step.
 
 ## Tech stack
 
