@@ -422,11 +422,12 @@ correlate `nodeAffinity` selectors with the actual node name.
 
 ### Phase 2 — local-path scanner
 
-- Real `LocalPathScanner` that walks configured roots.
-- Path resolution against `spec.local.path` and `spec.hostPath.path`.
+- Real `LocalPathScanner` that walks configured roots (depth-1 emit: the per-PV directory layer).
+- Path resolution against `spec.local.path` (with `kubernetes.io/hostname` In nodeAffinity) and `spec.hostPath.path` (wildcard across nodes).
 - Node correlation via downward-API `NODE_NAME`.
-- DaemonSet manifest under `deploy/daemonset.yaml`.
-- Integration test against `kind` with `local-path-provisioner` installed.
+- Informer-fed PV inventory + grace-period gating (§5.2) + the four aggregate gauges from §9.2.
+- `deploy/local-path-daemonset.yaml` (Namespace, ServiceAccount, ClusterRole [PVs only — PVCs/StorageClasses/Nodes get added when their consumers land], ClusterRoleBinding, DaemonSet, headless Service).
+- Integration scaffolding under `internal/integration/` (`//go:build integration`) using `fake.NewClientset` + `t.TempDir()` so the full pipeline (informer → inventory → walker → diff) is regression-covered without external infra. A real `kind`-based variant against `local-path-provisioner` lands alongside the Phase 3 kind harness.
 
 ### Phase 3 — NFS scanner
 
