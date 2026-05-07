@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command k8s-pv-orphan-exporter is the Phase 1 skeleton entry point.
-// It wires flag parsing, logging, the Kubernetes client/informer
-// factory, the (stub) local-path scanner, the operational metrics,
-// and the /metrics HTTP server. The diff engine and per-item metrics
-// land in Phase 2.
+// Command k8s-pv-orphan-exporter wires the exporter pipeline:
+// flag parsing, slog logging, the Kubernetes informer-fed PV
+// inventory, the per-backend scanners, the diff engine, the
+// grace-period gate, and the Prometheus collectors served on
+// /metrics.
 package main
 
 import (
@@ -37,6 +37,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/reloaded/k8s-pv-orphan-exporter/internal/diff"
+	"github.com/reloaded/k8s-pv-orphan-exporter/internal/grace"
+	"github.com/reloaded/k8s-pv-orphan-exporter/internal/inventory"
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/k8s"
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/metrics"
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/scanner"
@@ -49,6 +52,13 @@ func main() {
 		slog.Error("exporter failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+// scanState bundles the per-backend grace trackers so each scan loop
+// keeps stable state across iterations.
+type scanState struct {
+	dangling *grace.Tracker
+	orphaned *grace.Tracker
 }
 
 func run(args []string) error {
@@ -69,9 +79,13 @@ func run(args []string) error {
 
 	scanInterval := app.Flag("scan.interval", "How often to run a backend scan.").Default("5m").Duration()
 	scanTimeout := app.Flag("scan.timeout", "Per-scan timeout.").Default("2m").Duration()
+	gracePeriod := app.Flag("scan.grace-period", "Hold dangling/orphaned candidates back for at least this duration before exposing them, to suppress provisioning races.").Default("5m").Duration()
+	syncTimeout := app.Flag("k8s.sync-timeout", "Maximum time to wait for the PV informer cache to sync at startup.").Default("60s").Duration()
 
 	localPathEnabled := app.Flag("scanner.local-path.enabled", "Enable the local-path scanner.").Default("false").Bool()
 	localPathRoots := app.Flag("scanner.local-path.storage-roots", "Comma-separated list of storage roots to scan.").Default("/opt/local-path-provisioner").String()
+	localPathExcludes := app.Flag("scanner.local-path.exclude", "Comma-separated list of basenames to skip while walking storage roots.").Default("lost+found,.snapshot,.zfs").String()
+	localPathCrossFS := app.Flag("scanner.local-path.cross-fs", "Follow directory entries onto other filesystems. Default: skip mountpoints inside the storage root.").Default("false").Bool()
 
 	if _, err := app.Parse(args); err != nil {
 		return err
@@ -96,6 +110,11 @@ func run(args []string) error {
 		return fmt.Errorf("register operational metrics: %w", err)
 	}
 
+	agg := metrics.NewAggregate()
+	if err := agg.Register(registry); err != nil {
+		return fmt.Errorf("register aggregate metrics: %w", err)
+	}
+
 	nodeName := os.Getenv("NODE_NAME")
 	instanceID := nodeName
 	if instanceID == "" {
@@ -103,13 +122,10 @@ func run(args []string) error {
 		instanceID = host
 	}
 
-	var scanners []scanner.Scanner
-	if *localPathEnabled {
-		scanners = append(scanners, localpath.New(localpath.Config{
-			StorageRoots: splitCSV(*localPathRoots),
-			NodeName:     nodeName,
-		}))
-	}
+	inv := inventory.NewInventory()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
 	if *kubeconfig != "" || os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		cs, err := k8s.NewClient(k8s.ClientConfig{
@@ -121,26 +137,50 @@ func run(args []string) error {
 			slog.Warn("could not build kubernetes client; running without informer", "err", err)
 		} else {
 			factory := k8s.NewInformerFactory(cs, 5*time.Minute)
-			// Phase 1 wires the PV informer just enough to validate
-			// the shape of the dependency; it does not consume events
-			// yet — that's Phase 2.
-			_ = factory.Core().V1().PersistentVolumes().Informer()
-			slog.Info("kubernetes client and informer factory ready")
+			if err := k8s.RegisterPVHandler(factory, inv); err != nil {
+				return fmt.Errorf("register PV handler: %w", err)
+			}
+			factory.Start(ctx.Done())
+
+			syncCtx, syncCancel := context.WithTimeout(ctx, *syncTimeout)
+			synced := factory.WaitForCacheSync(syncCtx.Done())
+			syncCancel()
+			allSynced := true
+			for k, ok := range synced {
+				if !ok {
+					slog.Error("informer cache failed to sync", "type", k.String())
+					allSynced = false
+				}
+			}
+			if allSynced {
+				slog.Info("PV informer cache synced", "pv_count", len(inv.Snapshot()))
+			}
 		}
 	} else {
 		slog.Info("no kubeconfig and not in cluster; skipping kubernetes client")
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+	var scanners []scanner.Scanner
+	if *localPathEnabled {
+		scanners = append(scanners, localpath.New(localpath.Config{
+			StorageRoots: splitCSV(*localPathRoots),
+			Excludes:     splitCSV(*localPathExcludes),
+			NodeName:     nodeName,
+			CrossFS:      *localPathCrossFS,
+		}))
+	}
 
 	var wg sync.WaitGroup
 	for _, s := range scanners {
+		state := &scanState{
+			dangling: grace.New(*gracePeriod),
+			orphaned: grace.New(*gracePeriod),
+		}
 		wg.Add(1)
-		go func(s scanner.Scanner) {
+		go func(s scanner.Scanner, state *scanState) {
 			defer wg.Done()
-			runScanLoop(ctx, s, ops, instanceID, *scanInterval, *scanTimeout)
-		}(s)
+			runScanLoop(ctx, s, inv, ops, agg, state, instanceID, *scanInterval, *scanTimeout)
+		}(s, state)
 	}
 
 	mux := http.NewServeMux()
@@ -198,13 +238,26 @@ func run(args []string) error {
 	return nil
 }
 
-func runScanLoop(ctx context.Context, s scanner.Scanner, ops *metrics.Operational, instanceID string, interval, timeout time.Duration) {
+// runScanLoop drives one scanner: each tick scans, diffs against the
+// inventory, applies the grace gate, publishes the aggregate gauges,
+// and updates operational metrics.
+func runScanLoop(
+	ctx context.Context,
+	s scanner.Scanner,
+	inv *inventory.Inventory,
+	ops *metrics.Operational,
+	agg *metrics.Aggregate,
+	state *scanState,
+	instanceID string,
+	interval, timeout time.Duration,
+) {
 	backend := s.Backend()
 	tick := func() {
 		scanCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
+
 		start := time.Now()
-		_, err := s.Scan(scanCtx)
+		scanResult, err := s.Scan(scanCtx)
 		ops.ScanDuration.WithLabelValues(backend).Observe(time.Since(start).Seconds())
 		if err != nil {
 			slog.Error("scan failed", "backend", backend, "err", err)
@@ -212,8 +265,29 @@ func runScanLoop(ctx context.Context, s scanner.Scanner, ops *metrics.Operationa
 			ops.Up.WithLabelValues(backend, instanceID).Set(0)
 			return
 		}
+
+		pvs := inv.Snapshot()
+		result := diff.Compute(pvs, scanResult)
+		applyGrace(&result, state)
+		agg.Publish(&result)
+
+		for backendKind, count := range inv.SizeByBackend() {
+			ops.InventorySize.WithLabelValues(string(backendKind)).Set(float64(count))
+		}
+
 		ops.Up.WithLabelValues(backend, instanceID).Set(1)
 		ops.LastScanTimestamp.WithLabelValues(backend).Set(float64(time.Now().Unix()))
+
+		slog.Debug(
+			"scan completed",
+			"backend", backend,
+			"node", scanResult.Node,
+			"entries", len(scanResult.Entries),
+			"dangling", len(result.Dangling),
+			"orphaned", len(result.Orphaned),
+			"archived", len(result.Archived),
+			"released", len(result.Released),
+		)
 	}
 
 	tick()
@@ -227,6 +301,45 @@ func runScanLoop(ctx context.Context, s scanner.Scanner, ops *metrics.Operationa
 			tick()
 		}
 	}
+}
+
+// applyGrace gates result.Dangling and result.Orphaned through the
+// scan state's per-kind trackers, dropping items whose continuous
+// observation hasn't yet reached the configured grace period.
+//
+// Dangling keys are (PV.Name + path) so a hostPath PV with multiple
+// expected paths gets independent grace timers per node.
+func applyGrace(result *diff.Result, state *scanState) {
+	if state == nil {
+		return
+	}
+
+	danglingKeys := make([]string, 0, len(result.Dangling))
+	danglingByKey := make(map[string]diff.DanglingPV, len(result.Dangling))
+	for _, d := range result.Dangling {
+		key := d.PV.Name + "\x00" + d.ExpectedPath.Node + "\x00" + d.ExpectedPath.Path
+		danglingKeys = append(danglingKeys, key)
+		danglingByKey[key] = d
+	}
+	survived := state.dangling.Step(danglingKeys)
+	out := make([]diff.DanglingPV, 0, len(survived))
+	for _, key := range survived {
+		out = append(out, danglingByKey[key])
+	}
+	result.Dangling = out
+
+	orphanKeys := make([]string, 0, len(result.Orphaned))
+	orphanByKey := make(map[string]diff.OrphanedDir, len(result.Orphaned))
+	for _, o := range result.Orphaned {
+		orphanKeys = append(orphanKeys, o.Path)
+		orphanByKey[o.Path] = o
+	}
+	survivedO := state.orphaned.Step(orphanKeys)
+	outO := make([]diff.OrphanedDir, 0, len(survivedO))
+	for _, key := range survivedO {
+		outO = append(outO, orphanByKey[key])
+	}
+	result.Orphaned = outO
 }
 
 func classifyError(err error) string {
