@@ -1,0 +1,11 @@
+{
+  "recommendations": [
+    "ms-vscode-remote.remote-containers",
+    "golang.go",
+    "anthropic.claude-code",
+    "github.vscode-pull-request-github",
+    "redhat.vscode-yaml",
+    "tamasfe.even-better-toml",
+    "eamodio.gitlens"
+  ]
+}

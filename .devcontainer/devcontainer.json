@@ -1,0 +1,54 @@
+// .devcontainer/devcontainer.json
+// Development environment for k8s-pv-orphan-exporter (Go).
+// See https://containers.dev/ for the spec and https://containers.dev/features for available features.
+{
+  "name": "k8s-pv-orphan-exporter",
+
+  // Microsoft's official Go devcontainer image. The "1" tag tracks the latest
+  // stable Go release; pin to a specific minor (e.g. "1-1.23-bookworm") if reproducibility matters.
+  "image": "mcr.microsoft.com/devcontainers/go:1-bookworm",
+
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+      "minikube": "none"
+    },
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
+  },
+
+  "mounts": [
+    // Share user-level Claude Code skills from the host (read-only-ish bind).
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude/skills,target=/home/vscode/.claude/skills,type=bind,consistency=cached",
+    // Persist Claude Code conversation history across container rebuilds.
+    "source=claude-conversations-k8s-pv-orphan-exporter,target=/home/vscode/.claude/projects,type=volume"
+  ],
+
+  "postCreateCommand": "/bin/bash -lc \"$WORKSPACE_DIR/.devcontainer/postCreateCommand.sh\"",
+
+  "remoteEnv": {
+    "WORKSPACE_DIR": "/workspaces/k8s-pv-orphan-exporter",
+    "GOPATH": "/home/vscode/go",
+    "PATH": "${containerEnv:PATH}:/home/vscode/go/bin:/usr/local/go/bin"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "anthropic.claude-code",
+        "github.vscode-pull-request-github",
+        "redhat.vscode-yaml",
+        "tamasfe.even-better-toml",
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        "go.toolsManagement.autoUpdate": true,
+        "go.useLanguageServer": true
+      }
+    }
+  },
+
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true
+}

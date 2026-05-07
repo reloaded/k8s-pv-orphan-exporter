@@ -1,0 +1,37 @@
+{
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+
+  "go.useLanguageServer": true,
+  "go.lintTool": "golangci-lint",
+  "go.lintOnSave": "package",
+  "go.lintFlags": ["--fast"],
+  "go.formatTool": "goimports",
+  "go.testFlags": ["-v", "-race"],
+  "go.testTimeout": "120s",
+  "go.coverOnSave": false,
+  "go.coverageOptions": "showUncoveredCodeOnly",
+
+  "[go]": {
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    },
+    "editor.snippetSuggestions": "none"
+  },
+
+  "[go.mod]": {
+    "editor.formatOnSave": true
+  },
+
+  "[yaml]": {
+    "editor.formatOnSave": false
+  },
+
+  "gopls": {
+    "ui.semanticTokens": true,
+    "ui.completion.usePlaceholders": true,
+    "formatting.gofumpt": true
+  }
+}

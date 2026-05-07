@@ -1,0 +1,43 @@
+# Build output
+/bin/
+/dist/
+/build/
+/out/
+
+# Go binaries (root-level)
+/k8s-pv-orphan-exporter
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+profile.cov
+
+# Go workspace files (rarely committed for binary projects)
+go.work
+go.work.sum
+
+# Vendor (only committed if explicitly used)
+# vendor/
+
+# Editor / IDE
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# VSCode local overrides (the shared settings.json/extensions.json IS committed)
+.vscode/*.local
+.vscode/launch.json
+.vscode/tasks.json
+
+# Local environment
+.env
+.env.local
+*.local.yaml
+*.local.yml
+
+# Claude Code per-checkout state, including worktrees
+.claude/
