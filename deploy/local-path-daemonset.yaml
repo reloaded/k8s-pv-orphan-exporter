@@ -1,0 +1,178 @@
+# DaemonSet deployment for the local-path / hostPath backend.
+#
+# Each pod scans its node's local storage root via a host-path
+# mount. The pod knows its node name through the downward API so the
+# diff engine only flags PVs whose nodeAffinity targets the local
+# node.
+#
+# Image: this manifest pins :latest. Production deployments should
+# pin a specific vX.Y.Z tag. Phase 4 will ship a Helm chart that
+# parameterises this.
+#
+# Storage root: defaults to /opt/local-path-provisioner, the Rancher
+# local-path-provisioner default. Override --scanner.local-path.
+# storage-roots and the volume hostPath if your provisioner uses a
+# different root.
+#
+# Permissions: the distroless :nonroot image runs the binary as UID
+# 65532. Local-path-provisioner creates per-PV directories with 0777
+# by default, so the walker can ReadDir without elevating. If your
+# storage root has more restrictive permissions you'll need to add
+# `securityContext.runAsUser: 0` and switch to a :static-based
+# image, or `chmod o+rx` the root.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pv-orphan-exporter
+  labels:
+    app.kubernetes.io/name: k8s-pv-orphan-exporter
+    app.kubernetes.io/part-of: pv-orphan-exporter
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pv-orphan-exporter
+  namespace: pv-orphan-exporter
+
+---
+# Phase 2 only needs PVs. PVCs, StorageClasses, and Nodes get added
+# to this ClusterRole as later phases consume them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pv-orphan-exporter
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pv-orphan-exporter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pv-orphan-exporter
+subjects:
+  - kind: ServiceAccount
+    name: pv-orphan-exporter
+    namespace: pv-orphan-exporter
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pv-orphan-exporter-local-path
+  namespace: pv-orphan-exporter
+  labels:
+    app.kubernetes.io/name: k8s-pv-orphan-exporter
+    app.kubernetes.io/component: local-path-scanner
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k8s-pv-orphan-exporter
+      app.kubernetes.io/component: local-path-scanner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k8s-pv-orphan-exporter
+        app.kubernetes.io/component: local-path-scanner
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9877"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: pv-orphan-exporter
+      automountServiceAccountToken: true
+      # Tolerate every taint so the DaemonSet covers control-plane
+      # nodes too — they can hold PVs in single-node clusters and on
+      # k3s/k0s setups.
+      tolerations:
+        - operator: Exists
+      hostPID: false
+      hostNetwork: false
+      priorityClassName: system-node-critical
+      containers:
+        - name: exporter
+          image: ghcr.io/reloaded/k8s-pv-orphan-exporter:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --web.listen-address=:9877
+            - --log.level=info
+            - --log.format=json
+            - --scan.interval=5m
+            - --scan.grace-period=5m
+            - --scanner.local-path.enabled
+            - --scanner.local-path.storage-roots=/host/local-path
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: 9877
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: local-path
+              mountPath: /host/local-path
+              readOnly: true
+      volumes:
+        - name: local-path
+          hostPath:
+            # Override this if your local-path-provisioner is
+            # configured for a different root; pair the change with
+            # --scanner.local-path.storage-roots above.
+            path: /opt/local-path-provisioner
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pv-orphan-exporter-local-path
+  namespace: pv-orphan-exporter
+  labels:
+    app.kubernetes.io/name: k8s-pv-orphan-exporter
+    app.kubernetes.io/component: local-path-scanner
+spec:
+  type: ClusterIP
+  clusterIP: None # headless: one DNS record per pod, useful for ServiceMonitor scraping
+  selector:
+    app.kubernetes.io/name: k8s-pv-orphan-exporter
+    app.kubernetes.io/component: local-path-scanner
+  ports:
+    - name: metrics
+      port: 9877
+      targetPort: metrics
+      protocol: TCP
