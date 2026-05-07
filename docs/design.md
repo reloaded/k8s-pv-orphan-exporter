@@ -414,7 +414,11 @@ correlate `nodeAffinity` selectors with the actual node name.
 - `internal/scanner` interface and a stub `LocalPathScanner` that returns hardcoded data.
 - Basic operational metrics (`build_info`, `up`, `scan_duration_seconds`).
 - Unit tests for the diff engine using table-driven inputs.
-- Goal: `go build`, `go test`, container builds, scrape returns sensible metrics.
+- CI/CD under `.github/workflows/` (pulled forward from Phase 4):
+  - `ci.yml` — lint + test + build + docker build on every PR and `main` push (intended to be a required status check via repo branch protection).
+  - `release.yml` — multi-arch (`linux/amd64`, `linux/arm64`) image to `ghcr.io/reloaded/k8s-pv-orphan-exporter` on `v*` tags, tagged `vX.Y.Z`, `latest`, and `sha-<short>`.
+  - `nightly.yml` — daily unit (`-count=2`) and integration (`-tags=integration`) runs; the integration job runs now (no integration tests yet) and starts exercising real cases as Phase 2 lands them.
+- Goal: `go build`, `go test`, container builds, scrape returns sensible metrics, CI is green on PRs.
 
 ### Phase 2 — local-path scanner
 
@@ -437,10 +441,12 @@ correlate `nodeAffinity` selectors with the actual node name.
 - Helm chart under `charts/k8s-pv-orphan-exporter/`.
 - Example Grafana dashboard JSON.
 - Prometheus alerting rules under `deploy/prometheus-rules.yaml`.
-- Multi-arch container images (`linux/amd64`, `linux/arm64`) published to
-  `ghcr.io/reloaded/k8s-pv-orphan-exporter` via GitHub Actions. Tag scheme:
-  `latest` for `main`, `vX.Y.Z` for tagged releases, `sha-<short>` per push.
-- Goreleaser config for tagged releases.
+- Goreleaser config for tagged releases (binaries, checksums, GitHub Releases).
+
+> Note: the GitHub Actions workflows that build and publish multi-arch
+> container images to GHCR were originally scoped here but landed in
+> Phase 1 (`release.yml`). Phase 4 narrows to release artifacts other
+> than the container image.
 
 ### Phase 5 (roadmap, not committed)
 

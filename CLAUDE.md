@@ -31,16 +31,20 @@ What is in the repo today:
   - Operational metrics (`build_info`, `up`, `scan_duration_seconds`, `scan_errors_total`, `last_scan_timestamp_seconds`, `pv_inventory_size`).
   - Diff engine with table-driven tests in `internal/diff/`.
   - `Dockerfile` (multi-stage, distroless runtime).
+  - **CI/CD** under `.github/workflows/`:
+    - `ci.yml` — lint + `go test -race` + `go build` + `docker build` on every PR and every push to `main`. Intended to be a required status check (configured via repo branch protection, not the workflow file itself).
+    - `release.yml` — on `v*` tags, builds a multi-arch (`linux/amd64`, `linux/arm64`) image and pushes to `ghcr.io/reloaded/k8s-pv-orphan-exporter` tagged `vX.Y.Z`, `latest`, and `sha-<short>`.
+    - `nightly.yml` — daily `unit` (`-count=2`) and `integration` (`-tags=integration`) test passes; the integration job is wired now so Phase 2's kind-based tests start running automatically when added.
 
 What is **not** here yet (do not assume any of this exists — it is on the roadmap in `docs/design.md`):
 
 - No real disk-walking scanner — Phase 2.
 - No NFS scanner — Phase 3.
 - No Helm chart, no Kubernetes manifests, no `deploy/`.
-- No CI workflows under `.github/workflows/`.
 - No `Makefile` or `taskfile`.
-- No `.golangci.yml` lint config.
+- No `.golangci.yml` lint config (CI uses golangci-lint v2 defaults).
 - No Prometheus alerting rules, no Grafana dashboards.
+- No Goreleaser config (Phase 4).
 
 When starting a task, the **first thing to do** is read `docs/design.md` and pick the lowest-numbered phase whose work is not yet done. With Phase 1 landed, Phase 2 (real `LocalPathScanner` walker) is the obvious next step.
 
