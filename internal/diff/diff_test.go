@@ -125,6 +125,40 @@ func TestCompute(t *testing.T) {
 			name: "empty inputs yield empty result",
 			scan: scanResult("local-path", "node-1"),
 		},
+		{
+			name: "hostpath PV (empty Node) flags missing on every scanning node",
+			pvs: []inventory.PVRef{
+				pv("pv-hp", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("", "/data/pv-hp")),
+			},
+			scan:  scanResult("local-path", "node-1"),
+			wantD: []string{"pv-hp"},
+		},
+		{
+			name: "hostpath PV is satisfied when its directory is observed on the local node",
+			pvs: []inventory.PVRef{
+				pv("pv-hp", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("", "/data/pv-hp")),
+			},
+			scan: scanResultWithRoots("local-path", "node-1", []string{"/data"},
+				entry("/data/pv-hp", false)),
+		},
+		{
+			name: "expected path outside configured roots is ignored",
+			pvs: []inventory.PVRef{
+				pv("pv-elsewhere", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/var/elsewhere/pv-elsewhere")),
+			},
+			scan: scanResultWithRoots("local-path", "node-1", []string{"/opt/lpp"}),
+		},
+		{
+			name: "expected path under configured root with trailing-slash boundary",
+			pvs: []inventory.PVRef{
+				pv("pv-similar", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/opt/lppextra/pv-similar")),
+			},
+			scan: scanResultWithRoots("local-path", "node-1", []string{"/opt/lpp"}),
+		},
 	}
 
 	for _, tc := range tests {
@@ -194,6 +228,10 @@ func entry(path string, archived bool) scanner.Entry {
 
 func scanResult(backend, node string, entries ...scanner.Entry) scanner.ScanResult {
 	return scanner.ScanResult{Backend: backend, Node: node, Entries: entries}
+}
+
+func scanResultWithRoots(backend, node string, roots []string, entries ...scanner.Entry) scanner.ScanResult {
+	return scanner.ScanResult{Backend: backend, Node: node, Roots: roots, Entries: entries}
 }
 
 func assertNames(t *testing.T, label string, want, got []string) {
