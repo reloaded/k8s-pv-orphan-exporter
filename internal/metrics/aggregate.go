@@ -54,7 +54,7 @@ func NewAggregate() *Aggregate {
 		Released: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: Namespace,
 			Name:      "released_pvs_retained",
-			Help:      "Number of PVs in phase=Released with reclaimPolicy=Retain, by backend and storageclass (informational).",
+			Help:      "Number of PVs in phase=Released with reclaimPolicy=Retain, by backend and storageclass (informational). Populated by the cluster-wide collector (Phase 3); DaemonSet pods do not publish to avoid duplicate-by-instance series.",
 		}, []string{"backend", "storageclass"}),
 	}
 }
@@ -69,25 +69,25 @@ func (a *Aggregate) Register(r prometheus.Registerer) error {
 	return nil
 }
 
-// Publish replaces this (backend, node) slice of the aggregate
-// gauges with the counts derived from result. It is safe for one
-// goroutine per (backend, node) pair to call concurrently.
+// Publish replaces this (backend, node) slice of the dangling /
+// orphaned / archived gauges with the counts derived from result.
+// It is safe for one goroutine per (backend, node) pair to call
+// concurrently.
 //
-// The released gauge is keyed by (backend, storageclass) only — node
-// is not a label there because Released PVs are a cluster-wide fact,
-// not a per-node observation. To avoid double-counting from a
-// DaemonSet, only scans where Node == "" publish to Released. The
-// caller (main) is responsible for calling PublishReleased exactly
-// once per scan cycle from a non-DaemonSet vantage point; in v0
-// that's the cluster-wide sweep we haven't built yet, so for now
-// every scan publishes Released and DaemonSet runs will overcount.
-// Phase 3 will add a dedicated cluster-wide informer-only scan that
-// owns Released exclusively.
+// Released is deliberately NOT published here. Released PVs are a
+// cluster-wide fact, not a per-node observation, and every
+// DaemonSet pod sees the same global PV inventory via its informer.
+// Publishing the same cluster-wide count from N pods produces N
+// duplicate series distinguished only by `instance` — so a naive
+// `sum() by (backend, storageclass)` over-counts by N. A dedicated
+// cluster-wide collector lands in Phase 3 and will own the Released
+// gauge exclusively. The GaugeVec stays registered so its label
+// schema is fixed from the start; the series simply don't get
+// emitted until Phase 3.
 func (a *Aggregate) Publish(result *diff.Result) {
 	a.Dangling.DeletePartialMatch(prometheus.Labels{"backend": result.Backend, "node": result.Node})
 	a.Orphaned.DeletePartialMatch(prometheus.Labels{"backend": result.Backend, "node": result.Node})
 	a.Archived.DeletePartialMatch(prometheus.Labels{"backend": result.Backend, "node": result.Node})
-	a.Released.DeletePartialMatch(prometheus.Labels{"backend": result.Backend})
 
 	type scKey struct{ sc string }
 	dangling := map[scKey]int{}
@@ -100,12 +100,4 @@ func (a *Aggregate) Publish(result *diff.Result) {
 
 	a.Orphaned.WithLabelValues(result.Backend, result.Node).Set(float64(len(result.Orphaned)))
 	a.Archived.WithLabelValues(result.Backend, result.Node).Set(float64(len(result.Archived)))
-
-	released := map[scKey]int{}
-	for _, r := range result.Released {
-		released[scKey{r.PV.StorageClass}]++
-	}
-	for k, n := range released {
-		a.Released.WithLabelValues(result.Backend, k.sc).Set(float64(n))
-	}
 }
