@@ -80,6 +80,7 @@ func run(args []string) error {
 	scanInterval := app.Flag("scan.interval", "How often to run a backend scan.").Default("5m").Duration()
 	scanTimeout := app.Flag("scan.timeout", "Per-scan timeout.").Default("2m").Duration()
 	gracePeriod := app.Flag("scan.grace-period", "Hold dangling/orphaned candidates back for at least this duration before exposing them, to suppress provisioning races.").Default("5m").Duration()
+	scanMaxDepth := app.Flag("scan.max-depth", "Maximum directory depth under each storage root the walker descends. 1 catches the per-PV directory layer; 2 leaves headroom for CSI drivers that nest one extra level.").Default("2").Int()
 	syncTimeout := app.Flag("k8s.sync-timeout", "Maximum time to wait for the PV informer cache to sync at startup.").Default("60s").Duration()
 
 	localPathEnabled := app.Flag("scanner.local-path.enabled", "Enable the local-path scanner.").Default("false").Bool()
@@ -167,6 +168,7 @@ func run(args []string) error {
 			Excludes:     splitCSV(*localPathExcludes),
 			NodeName:     nodeName,
 			CrossFS:      *localPathCrossFS,
+			MaxDepth:     *scanMaxDepth,
 		}))
 	}
 

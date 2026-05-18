@@ -151,6 +151,8 @@ released   = R                  (informational; not an orphan)
 
 These four sets are computed per backend, per node (where applicable), per scan.
 
+When the walker descends below the per-PV directory layer (`--scan.max-depth` ≥ 2), the orphan set additionally drops any entry whose strict ancestor is in `P` (the contents of a real PV directory) or in the orphan set itself (a deeper subtree under an already-reported stray directory). The orphan list is therefore the *minimal* set of top-level stray directories under the storage root, not every directory the walker observed.
+
 ### 5.2 Grace period
 
 A directory may transiently be missing while a PV is being provisioned, or a
@@ -422,10 +424,10 @@ correlate `nodeAffinity` selectors with the actual node name.
 
 ### Phase 2 — local-path scanner
 
-- Real `LocalPathScanner` that walks configured roots (depth-1 emit: the per-PV directory layer).
+- Real `LocalPathScanner` that walks configured roots up to `--scan.max-depth` (default 2). Ancestor-aware orphan classification in `internal/diff` suppresses entries inside a known PV directory and reports nested orphan trees at the highest enclosing depth only.
 - Path resolution against `spec.local.path` (with `kubernetes.io/hostname` In nodeAffinity) and `spec.hostPath.path` (wildcard across nodes).
 - Node correlation via downward-API `NODE_NAME`.
-- Informer-fed PV inventory + grace-period gating (§5.2) + the four aggregate gauges from §9.2.
+- Informer-fed PV inventory + grace-period gating (§5.2) + three of the four aggregate gauges from §9.2 (dangling, orphaned, archived). The Released gauge stays registered but is owned by the Phase 3 cluster-wide collector — DaemonSet pods deliberately do not publish it to avoid duplicate-by-instance series.
 - `deploy/local-path-daemonset.yaml` (Namespace, ServiceAccount, ClusterRole [PVs only — PVCs/StorageClasses/Nodes get added when their consumers land], ClusterRoleBinding, DaemonSet, headless Service).
 - Integration scaffolding under `internal/integration/` (`//go:build integration`) using `fake.NewClientset` + `t.TempDir()` so the full pipeline (informer → inventory → walker → diff) is regression-covered without external infra. A real `kind`-based variant against `local-path-provisioner` lands alongside the Phase 3 kind harness.
 

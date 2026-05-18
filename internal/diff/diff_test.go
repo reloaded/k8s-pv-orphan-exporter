@@ -159,6 +159,48 @@ func TestCompute(t *testing.T) {
 			},
 			scan: scanResultWithRoots("local-path", "node-1", []string{"/opt/lpp"}),
 		},
+		{
+			name: "child of expected PV directory is not orphaned",
+			pvs: []inventory.PVRef{
+				pv("pv-real", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/opt/lpp/pv-real")),
+			},
+			scan: scanResult("local-path", "node-1",
+				entry("/opt/lpp/pv-real", false),
+				entry("/opt/lpp/pv-real/data", false)),
+		},
+		{
+			name: "grandchild of expected PV directory is not orphaned",
+			pvs: []inventory.PVRef{
+				pv("pv-real", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/opt/lpp/pv-real")),
+			},
+			scan: scanResult("local-path", "node-1",
+				entry("/opt/lpp/pv-real", false),
+				entry("/opt/lpp/pv-real/data", false),
+				entry("/opt/lpp/pv-real/data/nested", false)),
+		},
+		{
+			name: "child of orphan is suppressed; parent orphan reported once",
+			scan: scanResult("local-path", "node-1",
+				entry("/opt/lpp/pvc-stray", false),
+				entry("/opt/lpp/pvc-stray/data", false),
+				entry("/opt/lpp/pvc-stray/data/inner", false)),
+			wantO: []string{"/opt/lpp/pvc-stray"},
+		},
+		{
+			name: "siblings: one real PV, one orphan dir with children, only top-level orphan flagged",
+			pvs: []inventory.PVRef{
+				pv("pv-real", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/opt/lpp/pv-real")),
+			},
+			scan: scanResult("local-path", "node-1",
+				entry("/opt/lpp/pv-real", false),
+				entry("/opt/lpp/pv-real/data", false),
+				entry("/opt/lpp/pvc-stray", false),
+				entry("/opt/lpp/pvc-stray/data", false)),
+			wantO: []string{"/opt/lpp/pvc-stray"},
+		},
 	}
 
 	for _, tc := range tests {

@@ -15,14 +15,18 @@
 // Package localpath implements scanner.Scanner for the
 // local-path / hostPath backend.
 //
-// The walker enumerates direct children of each configured storage
-// root: for local-path-provisioner and the in-tree hostPath
-// provisioner, every per-PV directory lives exactly one level under
-// the root (`/opt/local-path-provisioner/pvc-<uuid>_<ns>_<name>`),
-// so a single ReadDir per root gives us every candidate entry. The
-// `--scan.max-depth` flag is plumbed in Config for future scanners
-// (CSI drivers that nest one or more provisioner-layout levels) but
-// is not used by this implementation.
+// The walker enumerates every directory entry from depth 1 to
+// Config.MaxDepth under each configured storage root. For
+// local-path-provisioner and the in-tree hostPath provisioner, every
+// per-PV directory lives exactly one level under the root
+// (`/opt/local-path-provisioner/pvc-<uuid>_<ns>_<name>`), so a depth
+// of 1 is sufficient for the typical layout. The flag's default of 2
+// (design.md §11) gives one extra level of headroom for CSI drivers
+// that nest a provisioner layer under the per-PV directory.
+//
+// Deeper entries don't false-positive as orphans: the diff engine
+// performs ancestor-aware classification — an observed directory
+// whose parent is in the PV inventory's expected paths is suppressed.
 package localpath
 
 import (
@@ -61,6 +65,14 @@ type Config struct {
 	// is skipped because its contents belong to a different
 	// scanner.
 	CrossFS bool
+	// MaxDepth bounds how deep under each storage root the walker
+	// descends. MaxDepth=1 means direct children only (the
+	// per-PV directory layer for local-path-provisioner);
+	// MaxDepth=2 catches one level of nested provisioner layout.
+	// MaxDepth<=0 emits no entries — useful for tests but a
+	// surprising default in production, so main.go always passes
+	// the explicit flag value.
+	MaxDepth int
 }
 
 // Scanner walks the configured storage roots on the local node.
@@ -113,9 +125,10 @@ func (s *Scanner) Scan(ctx context.Context) (*scanner.ScanResult, error) {
 	return result, nil
 }
 
-// scanRoot returns the direct-child directory entries of root. It
-// returns ctx errors verbatim so the outer Scan loop can propagate
-// them; everything else is wrapped with the root path for context.
+// scanRoot returns directory entries under root, walking from depth
+// 1 to s.cfg.MaxDepth. It returns ctx errors verbatim so the outer
+// Scan loop can propagate them; everything else is wrapped with the
+// root path for context.
 func (s *Scanner) scanRoot(ctx context.Context, root string, excludes map[string]struct{}) ([]scanner.Entry, error) {
 	rootInfo, err := os.Lstat(root)
 	if err != nil {
@@ -126,22 +139,44 @@ func (s *Scanner) scanRoot(ctx context.Context, root string, excludes map[string
 	}
 	rootDev, rootDevOK := deviceID(rootInfo)
 
-	dirEntries, err := os.ReadDir(root)
+	var out []scanner.Entry
+	if err := s.walk(ctx, root, 1, rootDev, rootDevOK, excludes, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// walk recurses under current, appending one Entry per directory
+// (and per symlink) it observes at depths 1..MaxDepth. A directory
+// at the boundary depth is still emitted; its contents are not
+// enumerated.
+func (s *Scanner) walk(
+	ctx context.Context,
+	current string,
+	depth int,
+	rootDev uint64,
+	rootDevOK bool,
+	excludes map[string]struct{},
+	out *[]scanner.Entry,
+) error {
+	if depth > s.cfg.MaxDepth {
+		return nil
+	}
+	dirEntries, err := os.ReadDir(current)
 	if err != nil {
-		return nil, fmt.Errorf("readdir %q: %w", root, err)
+		return fmt.Errorf("readdir %q: %w", current, err)
 	}
 
-	out := make([]scanner.Entry, 0, len(dirEntries))
 	for _, de := range dirEntries {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		name := de.Name()
 		if _, skip := excludes[name]; skip {
 			continue
 		}
 
-		full := filepath.Join(root, name)
+		full := filepath.Join(current, name)
 		info, err := os.Lstat(full)
 		if err != nil {
 			slog.WarnContext(ctx, "local-path scan: lstat failed",
@@ -150,17 +185,17 @@ func (s *Scanner) scanRoot(ctx context.Context, root string, excludes map[string
 		}
 
 		// Symlinks: record by name but never traverse. This
-		// matches design.md §11 — we deliberately do not
-		// follow links out of the scanned root.
+		// matches design.md §11 — we deliberately do not follow
+		// links out of the scanned root.
 		if info.Mode()&os.ModeSymlink != 0 {
-			out = append(out, scanner.Entry{Path: full, BaseName: name})
+			*out = append(*out, scanner.Entry{Path: full, BaseName: name})
 			continue
 		}
 
 		if !info.IsDir() {
-			// Non-directory at depth 1 isn't a PV layout we
-			// understand. Skip silently rather than count as
-			// an orphan.
+			// A regular file at any depth isn't part of the
+			// per-PV directory layout. Skip silently rather
+			// than count as an orphan.
 			continue
 		}
 
@@ -172,9 +207,19 @@ func (s *Scanner) scanRoot(ctx context.Context, root string, excludes map[string
 			}
 		}
 
-		out = append(out, scanner.Entry{Path: full, BaseName: name})
+		*out = append(*out, scanner.Entry{Path: full, BaseName: name})
+
+		if depth < s.cfg.MaxDepth {
+			if err := s.walk(ctx, full, depth+1, rootDev, rootDevOK, excludes, out); err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err
+				}
+				slog.WarnContext(ctx, "local-path scan: descend failed",
+					"path", full, "err", err)
+			}
+		}
 	}
-	return out, nil
+	return nil
 }
 
 func excludeSet(exclude []string) map[string]struct{} {

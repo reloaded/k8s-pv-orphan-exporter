@@ -34,6 +34,7 @@ func TestScan_DirectChildren(t *testing.T) {
 		StorageRoots: []string{root},
 		Excludes:     []string{"lost+found"},
 		NodeName:     "node-1",
+		MaxDepth:     1,
 	})
 	res, err := s.Scan(context.Background())
 	if err != nil {
@@ -62,7 +63,10 @@ func TestScan_MultipleRoots(t *testing.T) {
 	mkdirs(t, rootA, "pvc-a")
 	mkdirs(t, rootB, "pvc-b")
 
-	s := localpath.New(localpath.Config{StorageRoots: []string{rootA, rootB}})
+	s := localpath.New(localpath.Config{
+		StorageRoots: []string{rootA, rootB},
+		MaxDepth:     1,
+	})
 	res, err := s.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
@@ -76,6 +80,7 @@ func TestScan_MultipleRoots(t *testing.T) {
 func TestScan_MissingRootSkipped(t *testing.T) {
 	s := localpath.New(localpath.Config{
 		StorageRoots: []string{"/nonexistent/path/that/should/not/exist"},
+		MaxDepth:     1,
 	})
 	res, err := s.Scan(context.Background())
 	if err != nil {
@@ -87,14 +92,18 @@ func TestScan_MissingRootSkipped(t *testing.T) {
 }
 
 func TestScan_DepthOneOnly(t *testing.T) {
-	// A nested directory under a per-PV folder must not produce
-	// its own Entry. The walker only emits direct children of
-	// the configured root.
+	// MaxDepth=1: walker only emits direct children of the
+	// configured root. Grandchildren stay invisible — for the
+	// local-path-provisioner default layout that's the only
+	// information the diff engine needs.
 	root := t.TempDir()
 	mkdirs(t, root, "pvc-foo/data", "pvc-foo/etc")
 	mkdirs(t, root, "pvc-bar/etc")
 
-	s := localpath.New(localpath.Config{StorageRoots: []string{root}})
+	s := localpath.New(localpath.Config{
+		StorageRoots: []string{root},
+		MaxDepth:     1,
+	})
 	res, err := s.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
@@ -105,6 +114,67 @@ func TestScan_DepthOneOnly(t *testing.T) {
 	}
 }
 
+func TestScan_DepthTwoEmitsGrandchildren(t *testing.T) {
+	// MaxDepth=2: depth-1 PV directories plus their immediate
+	// children are emitted. The diff engine's ancestor-aware
+	// orphan classification suppresses grandchildren of expected
+	// PVs so this doesn't false-positive.
+	root := t.TempDir()
+	mkdirs(t, root, "pvc-foo/data", "pvc-foo/etc")
+	mkdirs(t, root, "pvc-bar/etc")
+
+	s := localpath.New(localpath.Config{
+		StorageRoots: []string{root},
+		MaxDepth:     2,
+	})
+	res, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	got := basenames(res.Entries)
+	// 2 depth-1 dirs + 3 depth-2 dirs = 5 entries (basenames may dup).
+	want := []string{"data", "etc", "etc", "pvc-bar", "pvc-foo"}
+	if !equalStringSlices(got, want) {
+		t.Errorf("entries: want %v, got %v", want, got)
+	}
+}
+
+func TestScan_DepthBoundaryStopsAtMax(t *testing.T) {
+	// MaxDepth=2: a depth-3 directory must NOT appear in entries.
+	root := t.TempDir()
+	mkdirs(t, root, "pvc-foo/data/deep")
+
+	s := localpath.New(localpath.Config{
+		StorageRoots: []string{root},
+		MaxDepth:     2,
+	})
+	res, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	for _, e := range res.Entries {
+		if filepath.Base(e.Path) == "deep" {
+			t.Errorf("depth-3 entry %q leaked through MaxDepth=2", e.Path)
+		}
+	}
+}
+
+func TestScan_MaxDepthZeroEmitsNothing(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "pvc-foo")
+	s := localpath.New(localpath.Config{
+		StorageRoots: []string{root},
+		MaxDepth:     0,
+	})
+	res, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(res.Entries) != 0 {
+		t.Errorf("MaxDepth=0: want no entries, got %v", basenames(res.Entries))
+	}
+}
+
 func TestScan_SymlinksRecordedNotTraversed(t *testing.T) {
 	root := t.TempDir()
 	mkdirs(t, root, "real-dir")
@@ -112,7 +182,7 @@ func TestScan_SymlinksRecordedNotTraversed(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(root, "linked")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	s := localpath.New(localpath.Config{StorageRoots: []string{root}})
+	s := localpath.New(localpath.Config{StorageRoots: []string{root}, MaxDepth: 1})
 	res, err := s.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
@@ -127,7 +197,7 @@ func TestScan_NonDirectoriesIgnored(t *testing.T) {
 	root := t.TempDir()
 	mkdirs(t, root, "pvc-real")
 	mkfile(t, filepath.Join(root, "stray-file.log"))
-	s := localpath.New(localpath.Config{StorageRoots: []string{root}})
+	s := localpath.New(localpath.Config{StorageRoots: []string{root}, MaxDepth: 1})
 	res, err := s.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
@@ -143,7 +213,7 @@ func TestScan_ContextCancelled(t *testing.T) {
 	mkdirs(t, root, "pvc-foo")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	s := localpath.New(localpath.Config{StorageRoots: []string{root}})
+	s := localpath.New(localpath.Config{StorageRoots: []string{root}, MaxDepth: 1})
 	if _, err := s.Scan(ctx); err == nil {
 		t.Errorf("expected context error, got nil")
 	}

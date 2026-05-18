@@ -38,7 +38,7 @@ What is in the repo today:
   - `internal/inventory/from_corev1.go` — `FromPV` translating `corev1.PersistentVolume` (Local + nodeAffinity, hostPath, in-tree NFS, `nfs.csi.k8s.io` subDir) into the engine's `PVRef`.
   - `internal/inventory/inventory.go` — thread-safe `Inventory` with Set/Delete/Snapshot/SizeByBackend.
   - `internal/k8s/pvhandler.go` — `RegisterPVHandler` wires the PV informer's Add/Update/Delete events into the inventory; handles `cache.DeletedFinalStateUnknown`.
-  - `internal/scanner/localpath/localpath.go` — real walker: `os.ReadDir` + `os.Lstat`, skip symlinks, exclude basenames, cross-fs boundary via `syscall.Stat_t.Dev` (per-platform via `device_unix.go` / `device_other.go`), depth-1 only (the per-PV directory layer).
+  - `internal/scanner/localpath/localpath.go` — real walker: `os.ReadDir` + `os.Lstat`, skip symlinks, exclude basenames, cross-fs boundary via `syscall.Stat_t.Dev` (per-platform via `device_unix.go` / `device_other.go`), recursive descent bounded by `--scan.max-depth` (default 2). Ancestor-aware orphan classification in `internal/diff` suppresses entries that are children of a known PV directory or of an already-reported orphan.
   - `internal/diff/diff.go` — `ExpectedPath.Node == ""` is now a wildcard for hostPath; `ScanResult.Roots` filters expected paths to those under a configured root.
   - `internal/grace/grace.go` — `Tracker.Step` implements design.md §5.2 grace gating; resets on disappearance.
   - `internal/metrics/aggregate.go` — the four cardinality-bounded gauge vectors (`dangling_pvs`, `orphaned_directories`, `archived_directories`, `released_pvs_retained`); `Publish` resets the per-(backend, node) slice cleanly between scans via `DeletePartialMatch`.

@@ -91,6 +91,7 @@ func TestLocalPathPipeline(t *testing.T) {
 	s := localpath.New(localpath.Config{
 		StorageRoots: []string{root},
 		NodeName:     nodeName,
+		MaxDepth:     1,
 	})
 	scanResult, err := s.Scan(ctx)
 	if err != nil {
@@ -137,6 +138,7 @@ func TestLocalPathPipeline_PVAddedAfterScan(t *testing.T) {
 	s := localpath.New(localpath.Config{
 		StorageRoots: []string{root},
 		NodeName:     nodeName,
+		MaxDepth:     1,
 	})
 
 	scanResult, err := s.Scan(ctx)
