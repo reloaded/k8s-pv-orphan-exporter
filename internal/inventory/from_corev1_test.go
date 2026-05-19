@@ -145,7 +145,10 @@ func TestFromPV(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := inventory.FromPV(tc.pv)
+			// Empty Config: no NFS scanner configured, so NFS
+			// paths stay raw (pre-Phase-3 behaviour). The
+			// mount-join cases are covered by TestFromPV_NFSPaths.
+			got := inventory.FromPV(tc.pv, inventory.Config{})
 			if got.Backend != tc.wantBackend {
 				t.Errorf("Backend: want %q, got %q", tc.wantBackend, got.Backend)
 			}
@@ -173,7 +176,7 @@ func TestFromPV_ClaimAndStatus(t *testing.T) {
 		},
 		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeReleased},
 	}
-	got := inventory.FromPV(pv)
+	got := inventory.FromPV(pv, inventory.Config{})
 	if got.StorageClass != "local-path" {
 		t.Errorf("StorageClass: want local-path, got %q", got.StorageClass)
 	}
@@ -185,6 +188,115 @@ func TestFromPV_ClaimAndStatus(t *testing.T) {
 	}
 	if got.ClaimNamespace != "default" || got.ClaimName != "demo" {
 		t.Errorf("ClaimRef: want default/demo, got %s/%s", got.ClaimNamespace, got.ClaimName)
+	}
+}
+
+// TestFromPV_NFSPaths covers issue #6: an NFS PV's server-side path
+// must be rewritten to the path the scanner observes under its mount.
+func TestFromPV_NFSPaths(t *testing.T) {
+	tests := []struct {
+		name      string
+		pv        *corev1.PersistentVolume
+		cfg       inventory.Config
+		wantPaths []inventory.ExpectedPath
+	}{
+		{
+			// Acceptance: mount=/mnt/nfs, subDir=team-a/pvc-1.
+			name: "nfs.csi.k8s.io subDir joined with mount path",
+			pv: pvBuilder("pv-csi", corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver: "nfs.csi.k8s.io",
+						VolumeAttributes: map[string]string{
+							"server": "nfs.example",
+							"share":  "/export/k8s",
+							"subDir": "team-a/pvc-1",
+						},
+					},
+				},
+			}),
+			cfg:       inventory.Config{NFS: inventory.NFSConfig{MountPath: "/mnt/nfs"}},
+			wantPaths: []inventory.ExpectedPath{{Path: "/mnt/nfs/team-a/pvc-1"}},
+		},
+		{
+			// Acceptance: spec.nfs.path=/export/k8s/team-a/pvc-1,
+			// export-root=/export/k8s, mount=/mnt/nfs.
+			name: "in-tree NFS path stripped of export root and joined with mount",
+			pv: pvBuilder("pv-nfs", corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					NFS: &corev1.NFSVolumeSource{Server: "nfs.example", Path: "/export/k8s/team-a/pvc-1"},
+				},
+			}),
+			cfg: inventory.Config{NFS: inventory.NFSConfig{
+				MountPath:  "/mnt/nfs",
+				ExportRoot: "/export/k8s",
+			}},
+			wantPaths: []inventory.ExpectedPath{{Path: "/mnt/nfs/team-a/pvc-1"}},
+		},
+		{
+			name: "configured server match keeps the PV in scope",
+			pv: pvBuilder("pv-nfs", corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					NFS: &corev1.NFSVolumeSource{Server: "nfs.example", Path: "/export/k8s/a"},
+				},
+			}),
+			cfg: inventory.Config{NFS: inventory.NFSConfig{
+				MountPath: "/mnt/nfs", ExportRoot: "/export/k8s", Server: "nfs.example",
+			}},
+			wantPaths: []inventory.ExpectedPath{{Path: "/mnt/nfs/a"}},
+		},
+		{
+			name: "different NFS server yields no expected paths",
+			pv: pvBuilder("pv-other", corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					NFS: &corev1.NFSVolumeSource{Server: "other.example", Path: "/export/k8s/a"},
+				},
+			}),
+			cfg: inventory.Config{NFS: inventory.NFSConfig{
+				MountPath: "/mnt/nfs", ExportRoot: "/export/k8s", Server: "nfs.example",
+			}},
+			wantPaths: nil,
+		},
+		{
+			name: "export-root boundary is component-wise (no /export/k8stra match)",
+			pv: pvBuilder("pv-sib", corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					NFS: &corev1.NFSVolumeSource{Server: "nfs.example", Path: "/export/k8stra/a"},
+				},
+			}),
+			cfg: inventory.Config{NFS: inventory.NFSConfig{
+				MountPath: "/mnt/nfs", ExportRoot: "/export/k8s",
+			}},
+			// Not under the export root: falls back to the raw
+			// server-side path; the diff engine's root filter then
+			// drops it (it isn't under /mnt/nfs).
+			wantPaths: []inventory.ExpectedPath{{Path: "/export/k8stra/a"}},
+		},
+		{
+			name: "csi without subDir yields no expected paths",
+			pv: pvBuilder("pv-csi-nosub", corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver:           "nfs.csi.k8s.io",
+						VolumeAttributes: map[string]string{"server": "nfs.example"},
+					},
+				},
+			}),
+			cfg:       inventory.Config{NFS: inventory.NFSConfig{MountPath: "/mnt/nfs"}},
+			wantPaths: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := inventory.FromPV(tc.pv, tc.cfg)
+			if got.Backend != inventory.BackendNFS {
+				t.Errorf("Backend: want %q, got %q", inventory.BackendNFS, got.Backend)
+			}
+			if !equalExpected(tc.wantPaths, got.ExpectedPaths) {
+				t.Errorf("ExpectedPaths: want %v, got %v", tc.wantPaths, got.ExpectedPaths)
+			}
+		})
 	}
 }
 

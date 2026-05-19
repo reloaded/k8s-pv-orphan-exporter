@@ -44,6 +44,7 @@ import (
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/metrics"
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/scanner"
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/scanner/localpath"
+	"github.com/reloaded/k8s-pv-orphan-exporter/internal/scanner/nfs"
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/version"
 )
 
@@ -88,6 +89,14 @@ func run(args []string) error {
 	localPathExcludes := app.Flag("scanner.local-path.exclude", "Comma-separated list of basenames to skip while walking storage roots.").Default("lost+found,.snapshot,.zfs").String()
 	localPathCrossFS := app.Flag("scanner.local-path.cross-fs", "Follow directory entries onto other filesystems. Default: skip mountpoints inside the storage root.").Default("false").Bool()
 
+	nfsEnabled := app.Flag("scanner.nfs.enabled", "Enable the NFS scanner.").Default("false").Bool()
+	nfsMountPath := app.Flag("scanner.nfs.mount-path", "Path inside the container where the NFS export is mounted (read-only).").Default("/mnt/nfs").String()
+	nfsServer := app.Flag("scanner.nfs.server", "NFS server to match against PV specs. Empty matches every NFS PV (single-export deployments).").Default("").String()
+	nfsExportRoot := app.Flag("scanner.nfs.export-root", "Server-side export root, stripped from an in-tree spec.nfs.path to compute the PV's path under the mount. Required for in-tree-NFS dangling detection.").Default("").String()
+	nfsArchivedPrefix := app.Flag("scanner.nfs.archived-prefix", "Basename prefix the subdir provisioner uses for deleted-but-retained directories; matching entries are reported as archived, not orphaned.").Default("archived-").String()
+	nfsExcludes := app.Flag("scanner.nfs.exclude", "Comma-separated list of basenames to skip while walking the NFS mount.").Default(".snapshot,lost+found").String()
+	nfsCrossFS := app.Flag("scanner.nfs.cross-fs", "Descend into nested mountpoints inside the NFS export. Default: skip them (they belong to a different scanner instance).").Default("false").Bool()
+
 	if _, err := app.Parse(args); err != nil {
 		return err
 	}
@@ -125,6 +134,19 @@ func run(args []string) error {
 
 	inv := inventory.NewInventory()
 
+	// Only thread NFS path-rewriting config in when the NFS scanner
+	// is enabled. Without an NFS scan, NFS PVs produce no signal
+	// anyway, so the zero NFSConfig (raw server-side paths) keeps
+	// behaviour inert and unsurprising for local-path-only pods.
+	invCfg := inventory.Config{}
+	if *nfsEnabled {
+		invCfg.NFS = inventory.NFSConfig{
+			MountPath:  *nfsMountPath,
+			ExportRoot: *nfsExportRoot,
+			Server:     *nfsServer,
+		}
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -138,7 +160,7 @@ func run(args []string) error {
 			slog.Warn("could not build kubernetes client; running without informer", "err", err)
 		} else {
 			factory := k8s.NewInformerFactory(cs, 5*time.Minute)
-			if err := k8s.RegisterPVHandler(factory, inv); err != nil {
+			if err := k8s.RegisterPVHandler(factory, inv, invCfg); err != nil {
 				return fmt.Errorf("register PV handler: %w", err)
 			}
 			factory.Start(ctx.Done())
@@ -169,6 +191,15 @@ func run(args []string) error {
 			NodeName:     nodeName,
 			CrossFS:      *localPathCrossFS,
 			MaxDepth:     *scanMaxDepth,
+		}))
+	}
+	if *nfsEnabled {
+		scanners = append(scanners, nfs.New(nfs.Config{
+			MountPath:      *nfsMountPath,
+			Excludes:       splitCSV(*nfsExcludes),
+			ArchivedPrefix: *nfsArchivedPrefix,
+			CrossFS:        *nfsCrossFS,
+			MaxDepth:       *scanMaxDepth,
 		}))
 	}
 

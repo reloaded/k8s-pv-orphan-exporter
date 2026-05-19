@@ -9,8 +9,11 @@ place to match your cluster.
 | File | When to use |
 |------|-------------|
 | `local-path-daemonset.yaml` | local-path / hostPath PVs — runs one pod per node, mounts the storage root read-only via `hostPath`. |
+| `deployment-nfs.yaml` | NFS PVs (in-tree, nfs-subdir-external-provisioner, or `nfs.csi.k8s.io`) — runs one replica per export, mounts the export read-only. |
 
-NFS-backed deployment (`deployment-nfs.yaml`) lands in Phase 3.
+Both manifests (re)declare the same `pv-orphan-exporter` Namespace /
+ServiceAccount / ClusterRole / ClusterRoleBinding, so they can be
+applied independently or together (idempotent).
 
 ## Quick start
 
@@ -48,3 +51,22 @@ If your storage root is more restrictive:
 - Alternative: switch the Dockerfile base image to a
   `:static`-rooted variant and add `securityContext.runAsUser: 0`
   to the DaemonSet pod template.
+
+## NFS
+
+`deployment-nfs.yaml` runs **one replica per export**. Before
+applying, edit the manifest's `nfs` volume (server + path) and these
+container args so PV path resolution is correct:
+
+| Arg | Must equal | Why |
+|-----|-----------|-----|
+| `--scanner.nfs.mount-path` | the `volumeMount.mountPath` (default `/mnt/nfs`) | where the binary looks inside the container |
+| `--scanner.nfs.server` | `spec.nfs.server` / CSI `volumeAttributes.server` on covered PVs | scopes this instance to its export; empty = match every NFS PV |
+| `--scanner.nfs.export-root` | the server-side export path (the `nfs.path` you mount) | stripped from in-tree `spec.nfs.path` to locate the PV under the mount — **required** for in-tree dangling detection |
+| `--scanner.nfs.archived-prefix` | your subdir provisioner's retained-dir prefix (default `archived-`) | so retained dirs report as *archived*, not *orphaned* |
+
+Run several exports by applying several copies with distinct
+`metadata.name`s (and matching args/volume per export).
+
+NFS PVs are cluster-wide, so unlike the DaemonSet the NFS Deployment
+emits metrics with an empty `node` label.
