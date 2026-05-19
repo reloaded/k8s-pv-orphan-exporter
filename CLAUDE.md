@@ -45,17 +45,23 @@ What is in the repo today:
   - `cmd/k8s-pv-orphan-exporter/main.go` — full pipeline: informer → inventory → scan → diff → grace → aggregate publish, with new flags `--scan.grace-period`, `--scanner.local-path.exclude`, `--scanner.local-path.cross-fs`, `--k8s.sync-timeout`.
   - `deploy/local-path-daemonset.yaml` — Namespace + ServiceAccount + ClusterRole (PVs only) + ClusterRoleBinding + DaemonSet (hostPath read-only, NODE_NAME, tolerates every taint, distroless-nonroot, readOnlyRootFilesystem) + headless Service. `deploy/README.md` documents quick-start and the storage-root / permissions trade-offs.
   - `internal/integration/local_path_test.go` — `//go:build integration` end-to-end test against `fake.NewClientset` + `t.TempDir()`, exercising both initial sync and the watch path (PV created after first scan).
+- **Phase 3 (NFS):**
+  - `internal/scanner/nfs/nfs.go` — `NFSScanner`: a near-twin of the local-path walker over a single `--scanner.nfs.mount-path` root, emitting an empty-`Node` `ScanResult` (NFS is cluster-wide), and tagging `--scanner.nfs.archived-prefix` directories as `Archived` (design.md §5.4). Per-package `device_{unix,other}.go` copies for the cross-fs check.
+  - `internal/inventory/from_corev1.go` — `FromPV` now takes an `inventory.Config`; `NFSConfig{MountPath,ExportRoot,Server}` rewrites a PV's server-side path (in-tree `spec.nfs.path` minus export-root; `nfs.csi.k8s.io` `subDir`) to the path the scanner observes under its mount, and drops PVs whose server is out of scope (issue #6). `RegisterPVHandler` threads the config through.
+  - `cmd/k8s-pv-orphan-exporter/main.go` — `--scanner.nfs.{enabled,mount-path,server,export-root,archived-prefix,exclude,cross-fs}` flags; NFS scanner appended to the scan loop when enabled.
+  - `deploy/deployment-nfs.yaml` — single-replica Deployment, read-only `nfs` volume, self-contained shared RBAC. `deploy/README.md` documents the arg/volume agreement.
+  - `internal/integration/nfs_test.go` — `//go:build integration` end-to-end NFS test (in-tree + CSI PVs, dangling/orphaned/archived, issue-#6 path rewrite, watch path).
 
 What is **not** here yet (do not assume any of this exists — it is on the roadmap in `docs/design.md`):
 
-- No NFS scanner — Phase 3.
-- No real `kind` integration test — Phase 2's integration test uses `fake.NewClientset`; Phase 3 wires kind. Nightly's `integration` job runs the fake variant today.
+- No real `kind` integration test — Phases 2 & 3 integration tests use `fake.NewClientset` + `t.TempDir()`; a real `kind` + sidecar-NFS variant (design.md §13) is future work. Nightly's `integration` job runs the fake variants today.
+- No cluster-wide inventory collector — issue #4 (per-DaemonSet informer dedup + cluster-owned `released_pvs_retained`) is deferred; the `Released` gauge stays registered but unpublished.
 - No Helm chart, no Grafana dashboard, no Prometheus alerting rules — Phase 4.
 - No `Makefile` or `taskfile`.
 - No `.golangci.yml` lint config (CI uses golangci-lint v2 defaults).
 - No Goreleaser config — Phase 4.
 
-When starting a task, the **first thing to do** is read `docs/design.md` and pick the lowest-numbered phase whose work is not yet done. With Phase 2 landed, Phase 3 (NFS scanner) is the obvious next step.
+When starting a task, the **first thing to do** is read `docs/design.md` and pick the lowest-numbered phase whose work is not yet done. With Phases 2 and 3 landed, Phase 4 (release polish: Helm chart, Grafana dashboard, Prometheus alerting rules, Goreleaser) is the next roadmap step; issue #4 (cluster-wide collector) and #8 (Update/Delete integration coverage) remain open out of band.
 
 ## Tech stack
 

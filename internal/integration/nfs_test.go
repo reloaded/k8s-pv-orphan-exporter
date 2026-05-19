@@ -14,15 +14,16 @@
 
 //go:build integration
 
-// Package integration exercises the local-path scanner end-to-end:
-// PVs are pushed through a fake informer into the inventory,
-// directories are created/removed on a real temp filesystem, and
-// the diff engine's output is asserted.
+// This file extends the integration suite to the Phase 3 NFS
+// pipeline: NFS PVs (in-tree and nfs.csi.k8s.io) are pushed through a
+// fake informer with the scanner-instance NFSConfig, a real temp
+// directory stands in for the mounted export, and the diff engine's
+// dangling/orphaned/archived output is asserted — including the
+// issue-#6 server-side-path → mount-path rewrite and the watch path.
 //
-// This test file is only compiled with `go test -tags=integration`,
-// so it runs in nightly CI but not on every PR. A future kind-based
-// variant (design.md §13) will exercise the same surface against a
-// real cluster + local-path-provisioner.
+// Like local_path_test.go it uses fake.NewClientset rather than a
+// real kind cluster; the kind + sidecar-NFS variant (design.md §13)
+// is future work tracked separately.
 package integration_test
 
 import (
@@ -41,41 +42,55 @@ import (
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/diff"
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/inventory"
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/k8s"
-	"github.com/reloaded/k8s-pv-orphan-exporter/internal/scanner/localpath"
+	"github.com/reloaded/k8s-pv-orphan-exporter/internal/scanner/nfs"
 )
 
-const nodeName = "test-node-1"
+const (
+	nfsServer     = "nfs.example"
+	nfsExportRoot = "/export/k8s"
+)
 
-// TestLocalPathPipeline drives the full Phase 2 pipeline against a
-// fake clientset and a real temp directory: a PV with no backing
-// directory must surface as dangling, a directory with no PV must
-// surface as orphaned, and a normal pair must produce neither.
-func TestLocalPathPipeline(t *testing.T) {
-	root := t.TempDir()
+// TestNFSPipeline drives the full Phase 3 pipeline against a fake
+// clientset and a real temp directory standing in for the mounted
+// export:
+//   - an in-tree NFS PV whose directory exists  → neither
+//   - a CSI nfs.csi.k8s.io PV whose dir is gone  → dangling
+//   - a directory referenced by no PV            → orphaned
+//   - an "archived-" directory                   → archived
+//
+// It also exercises issue #6: the in-tree PV's server-side
+// spec.nfs.path and the CSI subDir are both rewritten to the path the
+// scanner actually observes under the mount.
+func TestNFSPipeline(t *testing.T) {
+	mount := t.TempDir()
 
-	livePVDir := filepath.Join(root, "pvc-live_default_demo")
-	if err := os.Mkdir(livePVDir, 0o755); err != nil {
-		t.Fatalf("mkdir live: %v", err)
+	liveDir := filepath.Join(mount, "live")   // matches pv-live (in-tree)
+	strayDir := filepath.Join(mount, "stray") // no PV → orphan
+	archived := filepath.Join(mount, "archived-team-a-pvc-000")
+	for _, d := range []string{liveDir, strayDir, archived} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
 	}
-	strayDir := filepath.Join(root, "pvc-stray_kube-system_other")
-	if err := os.Mkdir(strayDir, 0o755); err != nil {
-		t.Fatalf("mkdir stray: %v", err)
-	}
 
-	livePV := makeLocalPV("pv-live", livePVDir, nodeName)
-	danglingPV := makeLocalPV("pv-dangling", filepath.Join(root, "pvc-missing_default_x"), nodeName)
+	livePV := makeInTreeNFSPV("pv-live", nfsServer, nfsExportRoot+"/live")
+	danglingPV := makeCSINFSPV("pv-dangling", nfsServer, "missing") // <mount>/missing not created
+
+	cfg := inventory.Config{NFS: inventory.NFSConfig{
+		MountPath:  mount,
+		ExportRoot: nfsExportRoot,
+		Server:     nfsServer,
+	}}
 
 	cs := fake.NewClientset(livePV, danglingPV)
 	factory := informers.NewSharedInformerFactory(cs, 0)
 	inv := inventory.NewInventory()
-
-	if err := k8s.RegisterPVHandler(factory, inv, inventory.Config{}); err != nil {
+	if err := k8s.RegisterPVHandler(factory, inv, cfg); err != nil {
 		t.Fatalf("RegisterPVHandler: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	stop := make(chan struct{})
 	defer close(stop)
 	factory.Start(stop)
@@ -83,15 +98,14 @@ func TestLocalPathPipeline(t *testing.T) {
 		factory.Core().V1().PersistentVolumes().Informer().HasSynced) {
 		t.Fatal("informer cache failed to sync")
 	}
-
 	if size := len(inv.Snapshot()); size != 2 {
 		t.Fatalf("inventory size: want 2, got %d", size)
 	}
 
-	s := localpath.New(localpath.Config{
-		StorageRoots: []string{root},
-		NodeName:     nodeName,
-		MaxDepth:     1,
+	s := nfs.New(nfs.Config{
+		MountPath:      mount,
+		ArchivedPrefix: "archived-",
+		MaxDepth:       1,
 	})
 	scanResult, err := s.Scan(ctx)
 	if err != nil {
@@ -106,22 +120,27 @@ func TestLocalPathPipeline(t *testing.T) {
 	if paths := orphanPaths(result.Orphaned); !equal(paths, []string{strayDir}) {
 		t.Errorf("orphaned: want [%q], got %v", strayDir, paths)
 	}
+	if paths := archivedPaths(result.Archived); !equal(paths, []string{archived}) {
+		t.Errorf("archived: want [%q], got %v", archived, paths)
+	}
 }
 
-// TestLocalPathPipeline_PVAddedAfterScan verifies the watch path:
-// scan now, add a PV, scan again, the new PV's existing directory
-// no longer appears as orphaned.
-func TestLocalPathPipeline_PVAddedAfterScan(t *testing.T) {
-	root := t.TempDir()
-	dir := filepath.Join(root, "pvc-late_default_demo")
+// TestNFSPipeline_PVAddedAfterScan verifies the watch path for NFS: a
+// stray directory stops being orphaned once a matching CSI PV is
+// created and observed by the informer.
+func TestNFSPipeline_PVAddedAfterScan(t *testing.T) {
+	mount := t.TempDir()
+	dir := filepath.Join(mount, "late")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 
+	cfg := inventory.Config{NFS: inventory.NFSConfig{MountPath: mount, Server: nfsServer}}
+
 	cs := fake.NewClientset()
 	factory := informers.NewSharedInformerFactory(cs, 0)
 	inv := inventory.NewInventory()
-	if err := k8s.RegisterPVHandler(factory, inv, inventory.Config{}); err != nil {
+	if err := k8s.RegisterPVHandler(factory, inv, cfg); err != nil {
 		t.Fatalf("RegisterPVHandler: %v", err)
 	}
 
@@ -135,27 +154,21 @@ func TestLocalPathPipeline_PVAddedAfterScan(t *testing.T) {
 		t.Fatal("informer cache failed to sync")
 	}
 
-	s := localpath.New(localpath.Config{
-		StorageRoots: []string{root},
-		NodeName:     nodeName,
-		MaxDepth:     1,
-	})
+	s := nfs.New(nfs.Config{MountPath: mount, ArchivedPrefix: "archived-", MaxDepth: 1})
 
 	scanResult, err := s.Scan(ctx)
 	if err != nil {
 		t.Fatalf("scan 1: %v", err)
 	}
-	first := diff.Compute(inv.Snapshot(), scanResult)
-	if len(first.Orphaned) != 1 {
+	if first := diff.Compute(inv.Snapshot(), scanResult); len(first.Orphaned) != 1 {
 		t.Fatalf("first scan orphan count: want 1, got %d", len(first.Orphaned))
 	}
 
-	pv := makeLocalPV("pv-late", dir, nodeName)
+	pv := makeCSINFSPV("pv-late", nfsServer, "late")
 	if _, err := cs.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("Create PV: %v", err)
 	}
 
-	// Wait for the inventory to observe the new PV.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && len(inv.Snapshot()) < 1 {
 		time.Sleep(50 * time.Millisecond)
@@ -177,55 +190,41 @@ func TestLocalPathPipeline_PVAddedAfterScan(t *testing.T) {
 	}
 }
 
-// makeLocalPV is a small builder for a Local-volume PV pinned to
-// node by spec.nodeAffinity (kubernetes.io/hostname In).
-func makeLocalPV(name, path, node string) *corev1.PersistentVolume {
+func makeInTreeNFSPV(name, server, path string) *corev1.PersistentVolume {
 	return &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: corev1.PersistentVolumeSpec{
-			StorageClassName: "local-path",
+			StorageClassName: "nfs",
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
-				Local: &corev1.LocalVolumeSource{Path: path},
+				NFS: &corev1.NFSVolumeSource{Server: server, Path: path},
 			},
-			NodeAffinity: &corev1.VolumeNodeAffinity{
-				Required: &corev1.NodeSelector{
-					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-						MatchExpressions: []corev1.NodeSelectorRequirement{{
-							Key:      "kubernetes.io/hostname",
-							Operator: corev1.NodeSelectorOpIn,
-							Values:   []string{node},
-						}},
-					}},
+		},
+	}
+}
+
+func makeCSINFSPV(name, server, subDir string) *corev1.PersistentVolume {
+	return &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: corev1.PersistentVolumeSpec{
+			StorageClassName: "nfs-csi",
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{
+					Driver: "nfs.csi.k8s.io",
+					VolumeAttributes: map[string]string{
+						"server": server,
+						"share":  nfsExportRoot,
+						"subDir": subDir,
+					},
 				},
 			},
 		},
 	}
 }
 
-func danglingNames(d []diff.DanglingPV) []string {
-	out := make([]string, 0, len(d))
-	for _, x := range d {
-		out = append(out, x.PV.Name)
-	}
-	return out
-}
-
-func orphanPaths(o []diff.OrphanedDir) []string {
-	out := make([]string, 0, len(o))
-	for _, x := range o {
+func archivedPaths(a []diff.ArchivedDir) []string {
+	out := make([]string, 0, len(a))
+	for _, x := range a {
 		out = append(out, x.Path)
 	}
 	return out
-}
-
-func equal(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

@@ -1,0 +1,189 @@
+# Deployment for the NFS backend.
+#
+# One replica scans a single mounted NFS export (design.md §6.2 /
+# §7). If you run several exports, run several copies of this
+# manifest — one Deployment per export — rather than mounting many
+# shares into one pod. That mirrors how node_exporter is deployed for
+# NFS and keeps a slow/hung export from stalling unrelated scans.
+#
+# You MUST edit two things before applying:
+#
+#   1. The `nfs` volume's server/path to point at YOUR export.
+#   2. The --scanner.nfs.* args so the binary resolves PV paths
+#      correctly:
+#        --scanner.nfs.server      must equal spec.nfs.server (and the
+#                                  nfs.csi.k8s.io volumeAttributes
+#                                  "server") on the PVs you want
+#                                  covered. Leave empty to match every
+#                                  NFS PV (single-export clusters).
+#        --scanner.nfs.export-root the server-side export path; it is
+#                                  stripped from an in-tree
+#                                  spec.nfs.path to compute the path
+#                                  under the mount. REQUIRED for
+#                                  in-tree-NFS dangling detection.
+#        --scanner.nfs.mount-path  must equal the volumeMount below.
+#
+# Image: pinned to :latest here; pin a vX.Y.Z tag in production. The
+# Phase 4 Helm chart will parameterise all of this.
+#
+# This manifest is self-contained: it (re)declares the shared
+# Namespace / ServiceAccount / ClusterRole / ClusterRoleBinding so it
+# can be applied on a cluster that has not applied
+# local-path-daemonset.yaml. The objects are identical to that file's
+# (same names, PV-only RBAC), so applying both is idempotent.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pv-orphan-exporter
+  labels:
+    app.kubernetes.io/name: k8s-pv-orphan-exporter
+    app.kubernetes.io/part-of: pv-orphan-exporter
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pv-orphan-exporter
+  namespace: pv-orphan-exporter
+
+---
+# PV-only read access — the exporter never writes and only needs PVs
+# to build its inventory. PVCs/StorageClasses/Nodes get added as
+# later phases consume them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pv-orphan-exporter
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pv-orphan-exporter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pv-orphan-exporter
+subjects:
+  - kind: ServiceAccount
+    name: pv-orphan-exporter
+    namespace: pv-orphan-exporter
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pv-orphan-exporter-nfs
+  namespace: pv-orphan-exporter
+  labels:
+    app.kubernetes.io/name: k8s-pv-orphan-exporter
+    app.kubernetes.io/component: nfs-scanner
+spec:
+  # Single replica: an NFS export is cluster-wide, not per-node.
+  # Running >1 replica would publish duplicate, identical series
+  # distinguished only by `instance`.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k8s-pv-orphan-exporter
+      app.kubernetes.io/component: nfs-scanner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k8s-pv-orphan-exporter
+        app.kubernetes.io/component: nfs-scanner
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9877"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: pv-orphan-exporter
+      automountServiceAccountToken: true
+      containers:
+        - name: exporter
+          image: ghcr.io/reloaded/k8s-pv-orphan-exporter:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --web.listen-address=:9877
+            - --log.level=info
+            - --log.format=json
+            - --scan.interval=5m
+            - --scan.grace-period=5m
+            - --scanner.nfs.enabled
+            - --scanner.nfs.mount-path=/mnt/nfs
+            # EDIT these three to match your export and PV specs:
+            - --scanner.nfs.server=nfs.example.internal
+            - --scanner.nfs.export-root=/export/k8s
+            - --scanner.nfs.archived-prefix=archived-
+          ports:
+            - name: metrics
+              containerPort: 9877
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: nfs-export
+              mountPath: /mnt/nfs
+              readOnly: true
+      volumes:
+        # Direct in-pod NFS mount. Alternatively, bind an NFS-backed
+        # PersistentVolumeClaim here — design.md §6.2 — if you'd
+        # rather manage the mount as a PV. Either way it MUST be
+        # readOnly: the exporter never writes to storage.
+        - name: nfs-export
+          nfs:
+            server: nfs.example.internal # EDIT: your NFS server
+            path: /export/k8s            # EDIT: the export root
+            readOnly: true
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pv-orphan-exporter-nfs
+  namespace: pv-orphan-exporter
+  labels:
+    app.kubernetes.io/name: k8s-pv-orphan-exporter
+    app.kubernetes.io/component: nfs-scanner
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: k8s-pv-orphan-exporter
+    app.kubernetes.io/component: nfs-scanner
+  ports:
+    - name: metrics
+      port: 9877
+      targetPort: metrics
+      protocol: TCP
