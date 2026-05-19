@@ -125,6 +125,82 @@ func TestCompute(t *testing.T) {
 			name: "empty inputs yield empty result",
 			scan: scanResult("local-path", "node-1"),
 		},
+		{
+			name: "hostpath PV (empty Node) flags missing on every scanning node",
+			pvs: []inventory.PVRef{
+				pv("pv-hp", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("", "/data/pv-hp")),
+			},
+			scan:  scanResult("local-path", "node-1"),
+			wantD: []string{"pv-hp"},
+		},
+		{
+			name: "hostpath PV is satisfied when its directory is observed on the local node",
+			pvs: []inventory.PVRef{
+				pv("pv-hp", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("", "/data/pv-hp")),
+			},
+			scan: scanResultWithRoots("local-path", "node-1", []string{"/data"},
+				entry("/data/pv-hp", false)),
+		},
+		{
+			name: "expected path outside configured roots is ignored",
+			pvs: []inventory.PVRef{
+				pv("pv-elsewhere", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/var/elsewhere/pv-elsewhere")),
+			},
+			scan: scanResultWithRoots("local-path", "node-1", []string{"/opt/lpp"}),
+		},
+		{
+			name: "expected path under configured root with trailing-slash boundary",
+			pvs: []inventory.PVRef{
+				pv("pv-similar", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/opt/lppextra/pv-similar")),
+			},
+			scan: scanResultWithRoots("local-path", "node-1", []string{"/opt/lpp"}),
+		},
+		{
+			name: "child of expected PV directory is not orphaned",
+			pvs: []inventory.PVRef{
+				pv("pv-real", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/opt/lpp/pv-real")),
+			},
+			scan: scanResult("local-path", "node-1",
+				entry("/opt/lpp/pv-real", false),
+				entry("/opt/lpp/pv-real/data", false)),
+		},
+		{
+			name: "grandchild of expected PV directory is not orphaned",
+			pvs: []inventory.PVRef{
+				pv("pv-real", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/opt/lpp/pv-real")),
+			},
+			scan: scanResult("local-path", "node-1",
+				entry("/opt/lpp/pv-real", false),
+				entry("/opt/lpp/pv-real/data", false),
+				entry("/opt/lpp/pv-real/data/nested", false)),
+		},
+		{
+			name: "child of orphan is suppressed; parent orphan reported once",
+			scan: scanResult("local-path", "node-1",
+				entry("/opt/lpp/pvc-stray", false),
+				entry("/opt/lpp/pvc-stray/data", false),
+				entry("/opt/lpp/pvc-stray/data/inner", false)),
+			wantO: []string{"/opt/lpp/pvc-stray"},
+		},
+		{
+			name: "siblings: one real PV, one orphan dir with children, only top-level orphan flagged",
+			pvs: []inventory.PVRef{
+				pv("pv-real", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/opt/lpp/pv-real")),
+			},
+			scan: scanResult("local-path", "node-1",
+				entry("/opt/lpp/pv-real", false),
+				entry("/opt/lpp/pv-real/data", false),
+				entry("/opt/lpp/pvc-stray", false),
+				entry("/opt/lpp/pvc-stray/data", false)),
+			wantO: []string{"/opt/lpp/pvc-stray"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -194,6 +270,10 @@ func entry(path string, archived bool) scanner.Entry {
 
 func scanResult(backend, node string, entries ...scanner.Entry) scanner.ScanResult {
 	return scanner.ScanResult{Backend: backend, Node: node, Entries: entries}
+}
+
+func scanResultWithRoots(backend, node string, roots []string, entries ...scanner.Entry) scanner.ScanResult {
+	return scanner.ScanResult{Backend: backend, Node: node, Roots: roots, Entries: entries}
 }
 
 func assertNames(t *testing.T, label string, want, got []string) {

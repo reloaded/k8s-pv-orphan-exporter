@@ -40,7 +40,14 @@ type ScanResult struct {
 	Backend string
 	// Node is the node name for node-local backends (local-path,
 	// hostPath); empty for cluster-wide backends like NFS.
-	Node    string
+	Node string
+	// Roots are the storage roots actually scanned. The diff
+	// engine uses these to ignore PVs whose expected paths fall
+	// outside any configured root — those PVs aren't covered by
+	// this scanner instance and shouldn't be flagged dangling.
+	// Empty Roots disables the prefix filter (Phase 1 stub
+	// behaviour).
+	Roots   []string
 	Entries []Entry
 }
 

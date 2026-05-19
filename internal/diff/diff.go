@@ -21,6 +21,10 @@
 package diff
 
 import (
+	"path/filepath"
+	"sort"
+	"strings"
+
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/inventory"
 	"github.com/reloaded/k8s-pv-orphan-exporter/internal/scanner"
 )
@@ -70,9 +74,24 @@ type ReleasedPV struct {
 //
 // Filtering rules:
 //   - PVs whose Backend does not match scan.Backend are ignored.
-//   - For node-local scans (scan.Node != ""), only ExpectedPaths whose
-//     Node matches scan.Node are considered — a DaemonSet pod on
-//     node-1 must not flag a PV bound to node-2 as dangling.
+//   - For node-local scans (scan.Node != ""), an ExpectedPath whose
+//     Node names a different node is skipped. An ExpectedPath with
+//     Node = "" is a wildcard — used for hostPath PVs that apply to
+//     every node.
+//   - If scan.Roots is non-empty, ExpectedPaths whose Path is not
+//     under any configured root are skipped: those PVs aren't
+//     covered by this scanner instance and shouldn't be flagged
+//     dangling.
+//
+// Orphan classification is ancestor-aware:
+//   - An observed entry whose path equals an expected path is the
+//     matching PV directory — not an orphan.
+//   - An observed entry whose path is *under* an expected path is
+//     the contents of a real PV directory (when the walker descends
+//     past depth 1) — not an orphan.
+//   - An observed entry whose ancestor is itself classified as an
+//     orphan is subsumed by the parent orphan — reported once at
+//     the highest enclosing depth.
 //
 // The function is deterministic: outputs only depend on inputs.
 func Compute(pvs []inventory.PVRef, scan *scanner.ScanResult) Result {
@@ -101,7 +120,10 @@ func Compute(pvs []inventory.PVRef, scan *scanner.ScanResult) Result {
 			res.Released = append(res.Released, ReleasedPV{PV: pv})
 		}
 		for _, ep := range pv.ExpectedPaths {
-			if scan.Node != "" && ep.Node != scan.Node {
+			if scan.Node != "" && ep.Node != "" && ep.Node != scan.Node {
+				continue
+			}
+			if !pathUnderRoots(ep.Path, scan.Roots) {
 				continue
 			}
 			expected[ep.Path] = struct{}{}
@@ -114,18 +136,82 @@ func Compute(pvs []inventory.PVRef, scan *scanner.ScanResult) Result {
 		}
 	}
 
-	for _, e := range scan.Entries {
+	res.Orphaned = classifyOrphans(scan.Entries, expected)
+	return res
+}
+
+// classifyOrphans applies the ancestor-aware filter described on
+// Compute. It walks entries shallowest-first so the orphan set can
+// be built incrementally — a deeper entry can then be suppressed by
+// reference to either expected (a real PV directory) or an
+// already-classified parent orphan.
+func classifyOrphans(entries []scanner.Entry, expected map[string]struct{}) []OrphanedDir {
+	candidates := make([]scanner.Entry, 0, len(entries))
+	for _, e := range entries {
 		if e.Archived {
 			continue
 		}
 		if _, ok := expected[e.Path]; ok {
 			continue
 		}
-		res.Orphaned = append(res.Orphaned, OrphanedDir{
-			Path:     e.Path,
-			BaseName: e.BaseName,
-		})
+		if hasAncestorInSet(e.Path, expected) {
+			continue
+		}
+		candidates = append(candidates, e)
 	}
 
-	return res
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return strings.Count(candidates[i].Path, "/") < strings.Count(candidates[j].Path, "/")
+	})
+
+	orphans := make([]OrphanedDir, 0, len(candidates))
+	orphanSet := make(map[string]struct{}, len(candidates))
+	for _, e := range candidates {
+		if hasAncestorInSet(e.Path, orphanSet) {
+			continue
+		}
+		orphans = append(orphans, OrphanedDir{Path: e.Path, BaseName: e.BaseName})
+		orphanSet[e.Path] = struct{}{}
+	}
+	return orphans
+}
+
+// hasAncestorInSet returns true if any strict ancestor directory of
+// path (i.e. filepath.Dir(path), its parent, ... up to "/") is a key
+// in set. Roots like "/" or "." terminate the walk.
+func hasAncestorInSet(path string, set map[string]struct{}) bool {
+	current := filepath.Dir(path)
+	for current != "" && current != "." && current != "/" {
+		if _, ok := set[current]; ok {
+			return true
+		}
+		next := filepath.Dir(current)
+		if next == current {
+			break
+		}
+		current = next
+	}
+	return false
+}
+
+// pathUnderRoots returns true when path is under any of the given
+// roots, treating an empty roots list as "no filter" (any path
+// passes). Match is by path-component, so /opt/lpp does not match
+// /opt/lppextra.
+func pathUnderRoots(path string, roots []string) bool {
+	if len(roots) == 0 {
+		return true
+	}
+	for _, root := range roots {
+		if path == root {
+			return true
+		}
+		if !strings.HasSuffix(root, "/") {
+			root += "/"
+		}
+		if strings.HasPrefix(path, root) {
+			return true
+		}
+	}
+	return false
 }

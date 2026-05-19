@@ -25,28 +25,37 @@ What is in the repo today:
 - A short `README.md` with a "Getting started" section.
 - **Phase 1 skeleton:**
   - `go.mod` / `go.sum` (module path `github.com/reloaded/k8s-pv-orphan-exporter`).
-  - `cmd/k8s-pv-orphan-exporter/` — `main` with flag parsing and `/metrics` server.
+  - `cmd/k8s-pv-orphan-exporter/` — `main` wiring the full pipeline.
   - `internal/{version,inventory,scanner,scanner/localpath,diff,metrics,k8s}/` packages.
-  - The `LocalPathScanner` is a stub — it returns hardcoded data; the real walker lands in Phase 2.
   - Operational metrics (`build_info`, `up`, `scan_duration_seconds`, `scan_errors_total`, `last_scan_timestamp_seconds`, `pv_inventory_size`).
   - Diff engine with table-driven tests in `internal/diff/`.
   - `Dockerfile` (multi-stage, distroless runtime).
   - **CI/CD** under `.github/workflows/`:
     - `ci.yml` — lint + `go test -race` + `go build` + `docker build` on every PR and every push to `main`. Intended to be a required status check (configured via repo branch protection, not the workflow file itself).
     - `release.yml` — on `v*` tags, builds a multi-arch (`linux/amd64`, `linux/arm64`) image and pushes to `ghcr.io/reloaded/k8s-pv-orphan-exporter` tagged `vX.Y.Z`, `latest`, and `sha-<short>`.
-    - `nightly.yml` — daily `unit` (`-count=2`) and `integration` (`-tags=integration`) test passes; the integration job is wired now so Phase 2's kind-based tests start running automatically when added.
+    - `nightly.yml` — daily `unit` (`-count=2`) and `integration` (`-tags=integration`) test passes.
+- **Phase 2 (local-path):**
+  - `internal/inventory/from_corev1.go` — `FromPV` translating `corev1.PersistentVolume` (Local + nodeAffinity, hostPath, in-tree NFS, `nfs.csi.k8s.io` subDir) into the engine's `PVRef`.
+  - `internal/inventory/inventory.go` — thread-safe `Inventory` with Set/Delete/Snapshot/SizeByBackend.
+  - `internal/k8s/pvhandler.go` — `RegisterPVHandler` wires the PV informer's Add/Update/Delete events into the inventory; handles `cache.DeletedFinalStateUnknown`.
+  - `internal/scanner/localpath/localpath.go` — real walker: `os.ReadDir` + `os.Lstat`, skip symlinks, exclude basenames, cross-fs boundary via `syscall.Stat_t.Dev` (per-platform via `device_unix.go` / `device_other.go`), recursive descent bounded by `--scan.max-depth` (default 2). Ancestor-aware orphan classification in `internal/diff` suppresses entries that are children of a known PV directory or of an already-reported orphan.
+  - `internal/diff/diff.go` — `ExpectedPath.Node == ""` is now a wildcard for hostPath; `ScanResult.Roots` filters expected paths to those under a configured root.
+  - `internal/grace/grace.go` — `Tracker.Step` implements design.md §5.2 grace gating; resets on disappearance.
+  - `internal/metrics/aggregate.go` — the four cardinality-bounded gauge vectors (`dangling_pvs`, `orphaned_directories`, `archived_directories`, `released_pvs_retained`); `Publish` resets the per-(backend, node) slice cleanly between scans via `DeletePartialMatch`.
+  - `cmd/k8s-pv-orphan-exporter/main.go` — full pipeline: informer → inventory → scan → diff → grace → aggregate publish, with new flags `--scan.grace-period`, `--scanner.local-path.exclude`, `--scanner.local-path.cross-fs`, `--k8s.sync-timeout`.
+  - `deploy/local-path-daemonset.yaml` — Namespace + ServiceAccount + ClusterRole (PVs only) + ClusterRoleBinding + DaemonSet (hostPath read-only, NODE_NAME, tolerates every taint, distroless-nonroot, readOnlyRootFilesystem) + headless Service. `deploy/README.md` documents quick-start and the storage-root / permissions trade-offs.
+  - `internal/integration/local_path_test.go` — `//go:build integration` end-to-end test against `fake.NewClientset` + `t.TempDir()`, exercising both initial sync and the watch path (PV created after first scan).
 
 What is **not** here yet (do not assume any of this exists — it is on the roadmap in `docs/design.md`):
 
-- No real disk-walking scanner — Phase 2.
 - No NFS scanner — Phase 3.
-- No Helm chart, no Kubernetes manifests, no `deploy/`.
+- No real `kind` integration test — Phase 2's integration test uses `fake.NewClientset`; Phase 3 wires kind. Nightly's `integration` job runs the fake variant today.
+- No Helm chart, no Grafana dashboard, no Prometheus alerting rules — Phase 4.
 - No `Makefile` or `taskfile`.
 - No `.golangci.yml` lint config (CI uses golangci-lint v2 defaults).
-- No Prometheus alerting rules, no Grafana dashboards.
-- No Goreleaser config (Phase 4).
+- No Goreleaser config — Phase 4.
 
-When starting a task, the **first thing to do** is read `docs/design.md` and pick the lowest-numbered phase whose work is not yet done. With Phase 1 landed, Phase 2 (real `LocalPathScanner` walker) is the obvious next step.
+When starting a task, the **first thing to do** is read `docs/design.md` and pick the lowest-numbered phase whose work is not yet done. With Phase 2 landed, Phase 3 (NFS scanner) is the obvious next step.
 
 ## Tech stack
 
