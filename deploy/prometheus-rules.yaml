@@ -1,0 +1,108 @@
+# Prometheus alerting rules for k8s-pv-orphan-exporter (design.md §9.4).
+#
+# Shipped as a Prometheus Operator PrometheusRule, matching the rest
+# of deploy/ (operator-style clusters). If you run plain Prometheus
+# (no operator), lift `spec.groups` verbatim into a file referenced by
+# `rule_files:` in prometheus.yml — the group/rule schema is identical.
+#
+# SELECTOR CAVEAT: most Prometheus Operator installs only pick up
+# PrometheusRule objects whose labels match the Prometheus CR's
+# `spec.ruleSelector` (commonly `release: <kube-prometheus-stack
+# release name>`). Add whatever label your install expects, or this
+# file is silently inert.
+#
+# THRESHOLDS assume the default --scan.interval=5m. The
+# PVOrphanExporterScanStalled 1800s (30m) threshold is ~6 missed
+# scans; if you raise --scan.interval, raise the threshold to match
+# (rule of thumb: > 6 × scan.interval).
+#
+# The exporter is strictly read-only — every alert below is "a human
+# should look", never "something will be auto-remediated".
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pv-orphan-exporter
+  namespace: pv-orphan-exporter
+  labels:
+    app.kubernetes.io/name: k8s-pv-orphan-exporter
+    app.kubernetes.io/part-of: pv-orphan-exporter
+    # app.kubernetes.io/component intentionally omitted: these rules
+    # cover every backend/topology, not one scanner.
+    #
+    # EDIT: add the label your Prometheus Operator's ruleSelector
+    # matches, e.g.:
+    #   release: kube-prometheus-stack
+spec:
+  groups:
+    - name: k8s-pv-orphan-exporter
+      rules:
+        # Issue #7: a wedged scan loop (stuck informer, hung
+        # filesystem walk, unrecovered panic) leaves the pod
+        # "healthy" per its liveness probe while its metrics go
+        # stale. THIS alert — not the liveness probe — is the
+        # supported way to detect that (deploy/README.md §Alerting).
+        #
+        # last_scan_timestamp_seconds only exists after the first
+        # successful scan, so a freshly-started or never-successful
+        # pod produces no series and does not false-fire here; the
+        # `up`-style coverage for "never scanned at all" is a
+        # separate concern (KubernetesDanglingPV/absent metrics).
+        - alert: PVOrphanExporterScanStalled
+          expr: time() - pv_orphan_exporter_last_scan_timestamp_seconds > 1800
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: >-
+              pv-orphan-exporter {{ $labels.backend }} scan stalled on
+              {{ $labels.instance }}
+            description: >-
+              No successful {{ $labels.backend }} scan from instance
+              {{ $labels.instance }} for {{ $value | humanizeDuration }}
+              (threshold 30m). The exporter's orphan/dangling metrics
+              for this instance are stale and must not be trusted.
+              Investigate a stuck client-go informer or a filesystem
+              walk hung on a slow mount; check
+              pv_orphan_exporter_scan_errors_total for the error kind.
+              The pod liveness probe deliberately does NOT cover this
+              (see deploy/README.md §Alerting).
+
+        - alert: KubernetesDanglingPV
+          expr: max_over_time(pv_orphan_exporter_dangling_pvs[15m]) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: >-
+              {{ $value }} PV(s) with a missing backing directory
+              ({{ $labels.backend }})
+            description: >-
+              backend={{ $labels.backend }}
+              storageclass={{ $labels.storageclass }}
+              node={{ $labels.node }} — {{ $value }} PersistentVolume(s)
+              whose backing directory was absent in every scan over the
+              last 15m. A workload binding one of these will fail to
+              mount with a confusing "no such file or directory". The
+              exporter never deletes anything; remediation is a human
+              decision (restore the directory, or delete the PV).
+
+        - alert: KubernetesOrphanedStorageDirectories
+          expr: max_over_time(pv_orphan_exporter_orphaned_directories[1h]) > 0
+          for: 1h
+          labels:
+            severity: info
+          annotations:
+            summary: >-
+              {{ $value }} orphaned storage directory(ies)
+              ({{ $labels.backend }})
+            description: >-
+              backend={{ $labels.backend }} node={{ $labels.node }} —
+              {{ $value }} directory(ies) under a configured storage
+              root that no PV references (archived-prefixed directories
+              are tracked separately and excluded here). These silently
+              consume disk and are never reclaimed automatically;
+              review and clean up manually. Informational by design:
+              orphans are common on healthy clusters after Retain-policy
+              PV churn.

@@ -51,17 +51,18 @@ What is in the repo today:
   - `cmd/k8s-pv-orphan-exporter/main.go` — `--scanner.nfs.{enabled,mount-path,server,export-root,archived-prefix,exclude,cross-fs}` flags; NFS scanner appended to the scan loop when enabled.
   - `deploy/deployment-nfs.yaml` — single-replica Deployment, read-only `nfs` volume, self-contained shared RBAC. `deploy/README.md` documents the arg/volume agreement.
   - `internal/integration/nfs_test.go` — `//go:build integration` end-to-end NFS test (in-tree + CSI PVs, dangling/orphaned/archived, issue-#6 path rewrite, watch path).
+- **Phase 4 (release polish — in progress):**
+  - `deploy/prometheus-rules.yaml` — Prometheus Operator `PrometheusRule` with the design.md §9.4 alerts: `PVOrphanExporterScanStalled` (issue #7 — the supported scan-stall detector, deliberately not the liveness probe), `KubernetesDanglingPV`, `KubernetesOrphanedStorageDirectories`. `deploy/README.md` §Alerting documents the operator-selector and threshold-vs-scan-interval caveats. No Go changes; metric names verified against `internal/metrics`.
 
 What is **not** here yet (do not assume any of this exists — it is on the roadmap in `docs/design.md`):
 
 - No real `kind` integration test — Phases 2 & 3 integration tests use `fake.NewClientset` + `t.TempDir()`; a real `kind` + sidecar-NFS variant (design.md §13) is future work. Nightly's `integration` job runs the fake variants today.
 - No cluster-wide inventory collector — issue #4 (per-DaemonSet informer dedup + cluster-owned `released_pvs_retained`) is deferred; the `Released` gauge stays registered but unpublished.
-- No Helm chart, no Grafana dashboard, no Prometheus alerting rules — Phase 4.
+- Phase 4 remaining: no Helm chart, no Grafana dashboard, no Goreleaser config. (Prometheus alerting rules: done, see above.)
 - No `Makefile` or `taskfile`.
 - No `.golangci.yml` lint config (CI uses golangci-lint v2 defaults).
-- No Goreleaser config — Phase 4.
 
-When starting a task, the **first thing to do** is read `docs/design.md` and pick the lowest-numbered phase whose work is not yet done. With Phases 2 and 3 landed, Phase 4 (release polish: Helm chart, Grafana dashboard, Prometheus alerting rules, Goreleaser) is the next roadmap step; issue #4 (cluster-wide collector) and #8 (Update/Delete integration coverage) remain open out of band.
+When starting a task, the **first thing to do** is read `docs/design.md` and pick the lowest-numbered phase whose work is not yet done. Phases 1–3 are landed and Phase 4 is in progress (Prometheus alerting rules done; Helm chart, Grafana dashboard, Goreleaser remain). Issues #4 (cluster-wide collector), #5 (`filepath.Clean` normalisation), #8 (Update/Delete integration coverage) remain open out of band.
 
 ## Tech stack
 

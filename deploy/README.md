@@ -10,6 +10,7 @@ place to match your cluster.
 |------|-------------|
 | `local-path-daemonset.yaml` | local-path / hostPath PVs — runs one pod per node, mounts the storage root read-only via `hostPath`. |
 | `deployment-nfs.yaml` | NFS PVs (in-tree, nfs-subdir-external-provisioner, or `nfs.csi.k8s.io`) — runs one replica per export, mounts the export read-only. |
+| `prometheus-rules.yaml` | Prometheus Operator `PrometheusRule` with the alerting rules (design.md §9.4). Apply on whichever topology you run; see [Alerting](#alerting). |
 
 Both manifests (re)declare the same `pv-orphan-exporter` Namespace /
 ServiceAccount / ClusterRole / ClusterRoleBinding, so they can be
@@ -70,3 +71,35 @@ Run several exports by applying several copies with distinct
 
 NFS PVs are cluster-wide, so unlike the DaemonSet the NFS Deployment
 emits metrics with an empty `node` label.
+
+## Alerting
+
+`prometheus-rules.yaml` ships three rules (design.md §9.4):
+
+| Alert | Fires when | Severity |
+|-------|-----------|----------|
+| `PVOrphanExporterScanStalled` | `time() - pv_orphan_exporter_last_scan_timestamp_seconds > 1800` for 10m | warning |
+| `KubernetesDanglingPV` | `pv_orphan_exporter_dangling_pvs > 0` sustained 15m, for 30m | warning |
+| `KubernetesOrphanedStorageDirectories` | `pv_orphan_exporter_orphaned_directories > 0` sustained 1h, for 1h | info |
+
+**`PVOrphanExporterScanStalled` is the supported way to detect a
+wedged scan loop — not the pod liveness probe.** The `/healthz`
+probe deliberately only reports that the HTTP server is up: a stuck
+informer or a filesystem walk hung on a slow mount leaves the pod
+"healthy" while its metrics silently go stale. Tying `/healthz` to
+scan freshness instead would restart pods every time a node's disk is
+briefly slow — worse than a stale metric. The alert is the right
+tool; the probe is intentionally dumb. (Background: issue #7.)
+
+Two things to check before relying on these:
+
+1. **Operator selector.** Most Prometheus Operator installs only load
+   `PrometheusRule` objects whose labels match the Prometheus CR's
+   `spec.ruleSelector` (often `release: <kube-prometheus-stack
+   release>`). Add that label to `metadata.labels` or the rules are
+   silently inert. Plain (non-operator) Prometheus: copy `spec.groups`
+   into a `rule_files:` file — the schema is identical.
+2. **Threshold vs scan interval.** The 1800s stall threshold assumes
+   the default `--scan.interval=5m` (~6 missed scans). If you raise
+   `--scan.interval`, raise the threshold to keep roughly that margin
+   (> 6 × interval).
