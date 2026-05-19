@@ -1,0 +1,73 @@
+{{- if .Values.prometheusRule.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "kpoe.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kpoe.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: k8s-pv-orphan-exporter
+      rules:
+        {{- if .Values.prometheusRule.rules.scanStalled }}
+        # The supported scan-stall detector — deliberately NOT the pod
+        # liveness probe (see chart README / issue #7).
+        - alert: PVOrphanExporterScanStalled
+          expr: time() - pv_orphan_exporter_last_scan_timestamp_seconds > {{ .Values.prometheusRule.scanStalledThresholdSeconds }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: >-
+              pv-orphan-exporter {{ "{{ $labels.backend }}" }} scan stalled on
+              {{ "{{ $labels.instance }}" }}
+            description: >-
+              No successful {{ "{{ $labels.backend }}" }} scan from instance
+              {{ "{{ $labels.instance }}" }} for {{ "{{ $value | humanizeDuration }}" }}.
+              The exporter's orphan/dangling metrics for this instance are
+              stale and must not be trusted. Investigate a stuck client-go
+              informer or a filesystem walk hung on a slow mount; check
+              pv_orphan_exporter_scan_errors_total for the error kind.
+        {{- end }}
+        {{- if .Values.prometheusRule.rules.danglingPV }}
+        - alert: KubernetesDanglingPV
+          expr: max_over_time(pv_orphan_exporter_dangling_pvs[15m]) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: >-
+              {{ "{{ $value }}" }} PV(s) with a missing backing directory
+              ({{ "{{ $labels.backend }}" }})
+            description: >-
+              backend={{ "{{ $labels.backend }}" }}
+              storageclass={{ "{{ $labels.storageclass }}" }}
+              node={{ "{{ $labels.node }}" }} — {{ "{{ $value }}" }}
+              PersistentVolume(s) whose backing directory was absent in
+              every scan over the last 15m. A workload binding one of these
+              will fail to mount. The exporter never deletes anything;
+              remediation is a human decision.
+        {{- end }}
+        {{- if .Values.prometheusRule.rules.orphanedDirectories }}
+        - alert: KubernetesOrphanedStorageDirectories
+          expr: max_over_time(pv_orphan_exporter_orphaned_directories[1h]) > 0
+          for: 1h
+          labels:
+            severity: info
+          annotations:
+            summary: >-
+              {{ "{{ $value }}" }} orphaned storage directory(ies)
+              ({{ "{{ $labels.backend }}" }})
+            description: >-
+              backend={{ "{{ $labels.backend }}" }} node={{ "{{ $labels.node }}" }}
+              — {{ "{{ $value }}" }} directory(ies) under a configured
+              storage root that no PV references (archived-prefixed
+              directories are tracked separately and excluded here). These
+              silently consume disk and are never reclaimed automatically;
+              review and clean up manually.
+        {{- end }}
+{{- end }}

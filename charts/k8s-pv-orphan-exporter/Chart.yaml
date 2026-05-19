@@ -1,0 +1,25 @@
+apiVersion: v2
+name: k8s-pv-orphan-exporter
+description: >-
+  Prometheus exporter that detects orphaned Kubernetes PersistentVolumes
+  and unreferenced storage directories on the disks behind them
+  (local-path / hostPath and NFS backends).
+type: application
+# Chart version: bump on every chart change (SemVer).
+version: 0.1.0
+# App version: the exporter image tag this chart defaults to. No
+# tagged release exists yet, so this tracks the `latest` image; pin
+# image.tag in values for production.
+appVersion: "latest"
+keywords:
+  - prometheus
+  - exporter
+  - persistentvolume
+  - storage
+  - orphan
+home: https://github.com/reloaded/k8s-pv-orphan-exporter
+sources:
+  - https://github.com/reloaded/k8s-pv-orphan-exporter
+maintainers:
+  - name: Jason Harris
+    email: 1337reloaded@gmail.com

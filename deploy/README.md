@@ -1,8 +1,13 @@
 # Deployment manifests
 
-Plain `kubectl apply -f` manifests for the exporter. The Phase 4
-Helm chart will parameterise these; until then, edit the YAML in
-place to match your cluster.
+Plain `kubectl apply -f` manifests for the exporter — edit the YAML
+in place to match your cluster.
+
+> **Prefer the Helm chart** for anything beyond a quick try:
+> [`charts/k8s-pv-orphan-exporter`](../charts/k8s-pv-orphan-exporter)
+> parameterises everything below (both topologies + these alerting
+> rules). These raw manifests stay maintained for Helm-free users and
+> as the canonical reference the chart is diffed against.
 
 ## Layout
 

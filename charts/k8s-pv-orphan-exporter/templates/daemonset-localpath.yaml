@@ -1,0 +1,101 @@
+{{- if .Values.localPath.enabled -}}
+{{- $sel := dict "ctx" . "component" "local-path-scanner" -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "kpoe.fullname" . }}-local-path
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kpoe.labels" . | nindent 4 }}
+    app.kubernetes.io/component: local-path-scanner
+spec:
+  selector:
+    matchLabels:
+      {{- include "kpoe.selectorLabels" $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kpoe.selectorLabels" $sel | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kpoe.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.localPath.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.localPath.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.localPath.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.localPath.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      hostPID: false
+      hostNetwork: false
+      containers:
+        - name: exporter
+          image: {{ include "kpoe.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --web.listen-address=:{{ .Values.listenPort }}
+            - --log.level={{ .Values.log.level }}
+            - --log.format={{ .Values.log.format }}
+            - --scan.interval={{ .Values.scan.interval }}
+            - --scan.timeout={{ .Values.scan.timeout }}
+            - --scan.grace-period={{ .Values.scan.gracePeriod }}
+            - --scan.max-depth={{ .Values.scan.maxDepth }}
+            - --scanner.local-path.enabled
+            - --scanner.local-path.storage-roots={{ join "," .Values.localPath.storageRoots }}
+            - --scanner.local-path.exclude={{ .Values.localPath.excludes }}
+            {{- if .Values.localPath.crossFs }}
+            - --scanner.local-path.cross-fs
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.listenPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.localPath.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: local-path
+              mountPath: {{ .Values.localPath.mountPath }}
+              readOnly: true
+      volumes:
+        - name: local-path
+          hostPath:
+            path: {{ .Values.localPath.hostPath }}
+            type: DirectoryOrCreate
+{{- end }}

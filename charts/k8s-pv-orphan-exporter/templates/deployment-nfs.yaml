@@ -1,0 +1,106 @@
+{{- if .Values.nfs.enabled -}}
+{{- $sel := dict "ctx" . "component" "nfs-scanner" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kpoe.fullname" . }}-nfs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kpoe.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nfs-scanner
+spec:
+  # One NFS export is cluster-wide, not per-node. >1 replica would
+  # publish duplicate identical series distinguished only by instance.
+  replicas: {{ .Values.nfs.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kpoe.selectorLabels" $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kpoe.selectorLabels" $sel | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kpoe.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nfs.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nfs.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nfs.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: exporter
+          image: {{ include "kpoe.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --web.listen-address=:{{ .Values.listenPort }}
+            - --log.level={{ .Values.log.level }}
+            - --log.format={{ .Values.log.format }}
+            - --scan.interval={{ .Values.scan.interval }}
+            - --scan.timeout={{ .Values.scan.timeout }}
+            - --scan.grace-period={{ .Values.scan.gracePeriod }}
+            - --scan.max-depth={{ .Values.scan.maxDepth }}
+            - --scanner.nfs.enabled
+            - --scanner.nfs.mount-path={{ .Values.nfs.mountPath }}
+            - --scanner.nfs.server={{ .Values.nfs.server }}
+            - --scanner.nfs.export-root={{ .Values.nfs.exportRoot }}
+            - --scanner.nfs.archived-prefix={{ .Values.nfs.archivedPrefix }}
+            - --scanner.nfs.exclude={{ .Values.nfs.excludes }}
+            {{- if .Values.nfs.crossFs }}
+            - --scanner.nfs.cross-fs
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.listenPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.nfs.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: nfs-export
+              mountPath: {{ .Values.nfs.mountPath }}
+              readOnly: true
+      volumes:
+        - name: nfs-export
+          {{- if .Values.nfs.volume.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.nfs.volume.existingClaim }}
+            readOnly: true
+          {{- else }}
+          nfs:
+            server: {{ required "nfs.volume.nfs.server is required when nfs.enabled and no existingClaim" .Values.nfs.volume.nfs.server }}
+            path: {{ required "nfs.volume.nfs.path is required when nfs.enabled and no existingClaim" .Values.nfs.volume.nfs.path }}
+            readOnly: true
+          {{- end }}
+{{- end }}
