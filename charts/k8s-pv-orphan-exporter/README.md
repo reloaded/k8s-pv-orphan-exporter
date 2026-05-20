@@ -21,6 +21,45 @@ templated — use `--namespace` / `--create-namespace` (idiomatic
 Helm). RBAC is cluster-scoped and release-named, so multiple installs
 don't collide.
 
+## Migrating from the raw `deploy/*.yaml` manifests
+
+The chart's cluster-scoped objects (`ClusterRole`,
+`ClusterRoleBinding`) and the `ServiceAccount` are **release-named**
+(e.g. `pv-orphan-exporter-k8s-pv-orphan-exporter`) so multiple Helm
+installs can coexist. The raw manifests use a fixed name
+(`pv-orphan-exporter`). The two name schemes do **not** overlap, so
+naively `helm install`-ing the chart on a cluster that already has
+the raw manifests applied creates a **parallel** set of objects
+rather than upgrading the existing ones — and the parallel
+DaemonSet / Deployment publishes the same metrics, double-counting
+every series via the extra `instance`.
+
+Migration is a one-time delete-then-install:
+
+```bash
+# Delete whichever raw objects you applied. Adjust per topology.
+kubectl -n pv-orphan-exporter delete \
+  daemonset/pv-orphan-exporter-local-path \
+  service/pv-orphan-exporter-local-path \
+  deployment/pv-orphan-exporter-nfs \
+  service/pv-orphan-exporter-nfs \
+  serviceaccount/pv-orphan-exporter \
+  --ignore-not-found
+kubectl delete \
+  clusterrolebinding/pv-orphan-exporter \
+  clusterrole/pv-orphan-exporter \
+  prometheusrule.monitoring.coreos.com/pv-orphan-exporter \
+  --ignore-not-found
+
+# Then install the chart.
+helm install pv-orphan-exporter ./charts/k8s-pv-orphan-exporter \
+  --namespace pv-orphan-exporter --create-namespace
+```
+
+You can also keep both running indefinitely (no security concern —
+both grant the same PV-read access), but Prometheus will see twice
+as many series per pod until you remove one set.
+
 ## Common configurations
 
 local-path with a k3s storage root:
