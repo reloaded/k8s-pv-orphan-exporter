@@ -54,12 +54,13 @@ What is in the repo today:
 - **Phase 4 (release polish — in progress):**
   - `deploy/prometheus-rules.yaml` — Prometheus Operator `PrometheusRule` with the design.md §9.4 alerts: `PVOrphanExporterScanStalled` (issue #7 — the supported scan-stall detector, deliberately not the liveness probe), `KubernetesDanglingPV`, `KubernetesOrphanedStorageDirectories`. `deploy/README.md` §Alerting documents the operator-selector and threshold-vs-scan-interval caveats. No Go changes; metric names verified against `internal/metrics`.
   - `charts/k8s-pv-orphan-exporter/` — Helm chart parameterising both topologies + the PrometheusRule (Chart.yaml, values.yaml, `_helpers.tpl`, SA/RBAC/DaemonSet/Deployment/Services/PrometheusRule templates, NOTES.txt, chart README). Namespace is NOT templated (idiomatic `--create-namespace`); cluster-scoped RBAC is release-named. Defaults reproduce `deploy/local-path-daemonset.yaml` (local-path on, NFS+rule off). Validated with `helm lint` + `helm template` across all toggles; no Go changes. Raw `deploy/*.yaml` retained as Helm-free path + diff reference.
+  - `.goreleaser.yaml` + `release.yml` `binaries` job — Goreleaser config cross-builds `linux/darwin × amd64/arm64` tarballs, generates `checksums.txt`, and creates the GitHub Release on `v*` tags. ldflags mirror the Dockerfile's so binary + image report the same `version.Version/Revision/Branch`. Runs in parallel with the existing image job, no docker overlap. Pinned to `goreleaser-action` `~> v2.5` (the latest v2 needs Go ≥1.26 while CI is on 1.25).
 
 What is **not** here yet (do not assume any of this exists — it is on the roadmap in `docs/design.md`):
 
 - No real `kind` integration test — Phases 2 & 3 integration tests use `fake.NewClientset` + `t.TempDir()`; a real `kind` + sidecar-NFS variant (design.md §13) is future work. Nightly's `integration` job runs the fake variants today.
 - No cluster-wide inventory collector — issue #4 (per-DaemonSet informer dedup + cluster-owned `released_pvs_retained`) is deferred; the `Released` gauge stays registered but unpublished.
-- Phase 4 remaining: no Grafana dashboard, no Goreleaser config. (Prometheus alerting rules + Helm chart: done, see above.)
+- Phase 4 remaining: no Grafana dashboard (separate open draft PR). (Prometheus alerting rules + Helm chart + Goreleaser: done.)
 - No `Makefile` or `taskfile`.
 - No `.golangci.yml` lint config (CI uses golangci-lint v2 defaults).
 

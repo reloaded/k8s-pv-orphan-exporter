@@ -16,11 +16,12 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write # 'write' so the binaries job can create the GitHub Release
   packages: write
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/k8s-pv-orphan-exporter
+  GO_VERSION: "1.25"
 
 jobs:
   release:
@@ -63,3 +64,34 @@ jobs:
             BRANCH=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  binaries:
+    # Goreleaser cross-compiles linux/darwin × amd64/arm64 tarballs,
+    # generates checksums.txt, and creates the GitHub Release.
+    # Runs in parallel with the image job; both triggered by the
+    # same v* tag, no cross-dependency.
+    name: build and publish binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # goreleaser needs the full history to render the changelog
+        # against the previous tag.
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: run goreleaser
+        # Pinned to v2.5.x — the latest v2 requires Go >=1.26 while
+        # this repo's Go version (env.GO_VERSION) is 1.25. Bump in
+        # lockstep when GO_VERSION is bumped.
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2.5"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
