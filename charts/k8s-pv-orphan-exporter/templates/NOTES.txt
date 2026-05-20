@@ -1,0 +1,35 @@
+k8s-pv-orphan-exporter ({{ include "kpoe.chart" . }}) installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Enabled scanners:
+{{- if .Values.localPath.enabled }}
+  - local-path  (DaemonSet {{ include "kpoe.fullname" . }}-local-path)
+      hostPath {{ .Values.localPath.hostPath }} -> {{ .Values.localPath.mountPath }} (ro)
+      storage-roots: {{ join "," .Values.localPath.storageRoots }}
+{{- end }}
+{{- if .Values.nfs.enabled }}
+  - nfs         (Deployment {{ include "kpoe.fullname" . }}-nfs, replicas={{ .Values.nfs.replicaCount }})
+      mount-path: {{ .Values.nfs.mountPath }}  server: {{ .Values.nfs.server | default "(match all)" }}  export-root: {{ .Values.nfs.exportRoot | default "(unset)" }}
+{{- if and (not .Values.nfs.exportRoot) (not .Values.nfs.volume.existingClaim) }}
+      WARNING: nfs.exportRoot is empty — in-tree spec.nfs.path PVs will NOT be
+               dangling-checked. Set it to your server-side export path.
+{{- end }}
+{{- end }}
+{{- if not (or .Values.localPath.enabled .Values.nfs.enabled) }}
+  (none — set localPath.enabled or nfs.enabled; nothing will scan)
+{{- end }}
+
+Scrape metrics:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kpoe.fullname" . }}-{{ if .Values.localPath.enabled }}local-path{{ else }}nfs{{ end }} {{ .Values.listenPort }}:{{ .Values.listenPort }}
+  curl localhost:{{ .Values.listenPort }}/metrics
+
+{{- if .Values.prometheusRule.enabled }}
+
+PrometheusRule installed. If your Prometheus Operator uses a ruleSelector,
+ensure prometheusRule.additionalLabels matches it or the rules are ignored.
+{{- if not .Values.prometheusRule.additionalLabels }}
+  (prometheusRule.additionalLabels is empty — many kube-prometheus-stack
+   installs need e.g. { release: kube-prometheus-stack })
+{{- end }}
+{{- end }}
+
+The exporter is read-only. It never deletes, renames, or writes to storage.

@@ -1,0 +1,30 @@
+{{- if .Values.rbac.create -}}
+# PV-only read access — the exporter never writes and only needs PVs
+# to build its inventory. Cluster-scoped objects are release-named so
+# multiple installs don't collide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kpoe.fullname" . }}
+  labels:
+    {{- include "kpoe.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kpoe.fullname" . }}
+  labels:
+    {{- include "kpoe.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kpoe.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kpoe.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

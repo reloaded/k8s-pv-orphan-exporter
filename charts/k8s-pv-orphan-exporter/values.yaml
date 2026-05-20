@@ -1,0 +1,160 @@
+# Default values for k8s-pv-orphan-exporter.
+#
+# The chart parameterises the two raw manifests in deploy/
+# (local-path DaemonSet, NFS Deployment) plus the PrometheusRule.
+# Defaults reproduce deploy/local-path-daemonset.yaml exactly:
+# local-path scanner ON, NFS OFF, PrometheusRule OFF.
+#
+# The exporter is strictly read-only; nothing here grants write
+# access or mounts storage read-write.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Extra labels added to every rendered object.
+commonLabels: {}
+
+image:
+  repository: ghcr.io/reloaded/k8s-pv-orphan-exporter
+  # Empty -> chart appVersion ("latest"). Pin a vX.Y.Z tag in prod.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  # If empty and create=true, a name is derived from the release.
+  name: ""
+  annotations: {}
+
+rbac:
+  # Cluster-scoped PV read access (get/list/watch persistentvolumes).
+  # The exporter cannot function without it; disable only if you bind
+  # the ServiceAccount to an equivalent ClusterRole yourself.
+  create: true
+
+# Shared exporter settings — applied to whichever scanners are enabled.
+log:
+  level: info # debug|info|warn|error
+  format: json # text|json
+scan:
+  interval: 5m
+  gracePeriod: 5m
+  timeout: 2m
+  # Directory depth under each root the walker descends (design.md §11).
+  maxDepth: 2
+
+# Container port / metrics endpoint.
+listenPort: 9877
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Pod template extras (merged into both workloads).
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9877"
+  prometheus.io/path: "/metrics"
+podLabels: {}
+
+# ----------------------------------------------------------------------
+# local-path / hostPath backend — DaemonSet, one pod per node.
+# ----------------------------------------------------------------------
+localPath:
+  enabled: true
+  # Roots the binary scans inside the container
+  # (--scanner.local-path.storage-roots, comma-joined).
+  storageRoots:
+    - /host/local-path
+  # Node path mounted (read-only) into the container. Must point at
+  # your local-path-provisioner root.
+  hostPath: /opt/local-path-provisioner
+  # Where hostPath is mounted in the container; must contain every
+  # entry in storageRoots.
+  mountPath: /host/local-path
+  excludes: "lost+found,.snapshot,.zfs"
+  crossFs: false
+  # DaemonSets usually need to tolerate all taints so control-plane
+  # nodes (which can hold PVs on k3s/single-node) are covered.
+  tolerations:
+    - operator: Exists
+  priorityClassName: system-node-critical
+  nodeSelector: {}
+  affinity: {}
+  service:
+    type: ClusterIP
+    # Headless: one DNS record per pod, ideal for per-pod scraping.
+    clusterIP: None
+  # Container securityContext. local-path-provisioner makes per-PV
+  # dirs 0777, so the distroless-nonroot UID can ReadDir; tighten the
+  # root perms or run as 0 if yours is stricter (see chart README).
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+# ----------------------------------------------------------------------
+# NFS backend — Deployment, ONE replica per export.
+# Run several exports = several releases (or extra NFS values blocks
+# in your own umbrella), not replicas>1.
+# ----------------------------------------------------------------------
+nfs:
+  enabled: false
+  mountPath: /mnt/nfs
+  # Scopes this instance to one NFS server; empty matches every NFS
+  # PV (single-export clusters). Must equal spec.nfs.server / the
+  # nfs.csi.k8s.io volumeAttributes "server" on covered PVs.
+  server: ""
+  # Server-side export root, stripped from an in-tree spec.nfs.path.
+  # REQUIRED for in-tree NFS dangling detection (see chart README).
+  exportRoot: ""
+  archivedPrefix: "archived-"
+  excludes: ".snapshot,lost+found"
+  crossFs: false
+  replicaCount: 1
+  # The exporter pod's own read-only mount of the export. Provide
+  # EITHER an inline NFS volume OR an existing PVC name.
+  volume:
+    nfs:
+      server: "" # NFS server hostname/IP
+      path: "" # export path on that server
+    existingClaim: "" # if set, used instead of volume.nfs
+  service:
+    type: ClusterIP
+  tolerations: []
+  nodeSelector: {}
+  affinity: {}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+# ----------------------------------------------------------------------
+# Prometheus Operator alerting rules (deploy/prometheus-rules.yaml).
+# Requires the monitoring.coreos.com/v1 PrometheusRule CRD.
+# ----------------------------------------------------------------------
+prometheusRule:
+  enabled: false
+  # Labels your Prometheus Operator's ruleSelector matches, e.g.
+  # { release: kube-prometheus-stack }. Without these the rule is
+  # silently ignored by the operator.
+  additionalLabels: {}
+  # Seconds without a successful scan before PVOrphanExporterScanStalled
+  # fires. Keep > 6 x scan.interval.
+  scanStalledThresholdSeconds: 1800
+  rules:
+    scanStalled: true
+    danglingPV: true
+    orphanedDirectories: true

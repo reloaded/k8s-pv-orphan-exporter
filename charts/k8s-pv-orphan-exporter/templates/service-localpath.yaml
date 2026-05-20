@@ -1,0 +1,22 @@
+{{- if .Values.localPath.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kpoe.fullname" . }}-local-path
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kpoe.labels" . | nindent 4 }}
+    app.kubernetes.io/component: local-path-scanner
+spec:
+  type: {{ .Values.localPath.service.type }}
+  {{- with .Values.localPath.service.clusterIP }}
+  clusterIP: {{ . | quote }}
+  {{- end }}
+  selector:
+    {{- include "kpoe.selectorLabels" (dict "ctx" . "component" "local-path-scanner") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.listenPort }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}
