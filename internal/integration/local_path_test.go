@@ -177,6 +177,158 @@ func TestLocalPathPipeline_PVAddedAfterScan(t *testing.T) {
 	}
 }
 
+// TestLocalPathPipeline_PVUpdated_RewritesExpectedPaths drives the
+// Update event on the informer: a live PV's spec.local.path changes,
+// the inventory's expected path must flip cleanly so the OLD
+// directory becomes an orphan and the NEW (still-missing) one
+// becomes dangling on the next scan.
+func TestLocalPathPipeline_PVUpdated_RewritesExpectedPaths(t *testing.T) {
+	root := t.TempDir()
+	dirA := filepath.Join(root, "pvc-A_default_demo")
+	if err := os.Mkdir(dirA, 0o755); err != nil {
+		t.Fatalf("mkdir A: %v", err)
+	}
+	dirB := filepath.Join(root, "pvc-B_default_demo") // PV will be re-pointed here; left absent on disk
+
+	pv := makeLocalPV("pv-mutable", dirA, nodeName)
+
+	cs := fake.NewClientset(pv)
+	factory := informers.NewSharedInformerFactory(cs, 0)
+	inv := inventory.NewInventory()
+	if err := k8s.RegisterPVHandler(factory, inv, inventory.Config{}); err != nil {
+		t.Fatalf("RegisterPVHandler: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stop := make(chan struct{})
+	defer close(stop)
+	factory.Start(stop)
+	if !cache.WaitForCacheSync(ctx.Done(),
+		factory.Core().V1().PersistentVolumes().Informer().HasSynced) {
+		t.Fatal("informer cache failed to sync")
+	}
+
+	s := localpath.New(localpath.Config{
+		StorageRoots: []string{root},
+		NodeName:     nodeName,
+		MaxDepth:     1,
+	})
+
+	scan1, err := s.Scan(ctx)
+	if err != nil {
+		t.Fatalf("scan 1: %v", err)
+	}
+	first := diff.Compute(inv.Snapshot(), scan1)
+	if len(first.Dangling)+len(first.Orphaned) != 0 {
+		t.Fatalf("scan 1: want no dangling/orphans, got dangling=%v orphans=%v",
+			danglingNames(first.Dangling), orphanPaths(first.Orphaned))
+	}
+
+	// Update the PV's path A -> B. Fetch first so we send back the
+	// tracker's current resourceVersion (defensive; fake's lossless
+	// here, but kind would care).
+	current, err := cs.CoreV1().PersistentVolumes().Get(ctx, "pv-mutable", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get pv-mutable: %v", err)
+	}
+	current.Spec.Local.Path = dirB
+	if _, err := cs.CoreV1().PersistentVolumes().Update(ctx, current, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("Update pv-mutable: %v", err)
+	}
+
+	// Wait for the inventory to reflect the new ExpectedPath.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := inv.Snapshot()
+		if len(snap) == 1 && len(snap[0].ExpectedPaths) == 1 && snap[0].ExpectedPaths[0].Path == dirB {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if snap := inv.Snapshot(); len(snap) != 1 || snap[0].ExpectedPaths[0].Path != dirB {
+		t.Fatalf("inventory did not observe Update: snap=%+v", snap)
+	}
+
+	scan2, err := s.Scan(ctx)
+	if err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	second := diff.Compute(inv.Snapshot(), scan2)
+
+	if names := danglingNames(second.Dangling); !equal(names, []string{"pv-mutable"}) {
+		t.Errorf("scan 2 dangling: want [pv-mutable], got %v", names)
+	}
+	if paths := orphanPaths(second.Orphaned); !equal(paths, []string{dirA}) {
+		t.Errorf("scan 2 orphaned: want [%q], got %v", dirA, paths)
+	}
+}
+
+// TestLocalPathPipeline_PVDeleted_FlipsToOrphaned drives the Delete
+// event: a matched PV is removed via the API, and on the next scan
+// its formerly-claimed directory must surface as orphaned.
+func TestLocalPathPipeline_PVDeleted_FlipsToOrphaned(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "pvc-gone_default_demo")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	pv := makeLocalPV("pv-gone", dir, nodeName)
+
+	cs := fake.NewClientset(pv)
+	factory := informers.NewSharedInformerFactory(cs, 0)
+	inv := inventory.NewInventory()
+	if err := k8s.RegisterPVHandler(factory, inv, inventory.Config{}); err != nil {
+		t.Fatalf("RegisterPVHandler: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stop := make(chan struct{})
+	defer close(stop)
+	factory.Start(stop)
+	if !cache.WaitForCacheSync(ctx.Done(),
+		factory.Core().V1().PersistentVolumes().Informer().HasSynced) {
+		t.Fatal("informer cache failed to sync")
+	}
+
+	s := localpath.New(localpath.Config{
+		StorageRoots: []string{root},
+		NodeName:     nodeName,
+		MaxDepth:     1,
+	})
+
+	scan1, err := s.Scan(ctx)
+	if err != nil {
+		t.Fatalf("scan 1: %v", err)
+	}
+	if first := diff.Compute(inv.Snapshot(), scan1); len(first.Orphaned) != 0 {
+		t.Fatalf("scan 1: want no orphans, got %v", orphanPaths(first.Orphaned))
+	}
+
+	if err := cs.CoreV1().PersistentVolumes().Delete(ctx, "pv-gone", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("Delete pv-gone: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(inv.Snapshot()) > 0 {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := len(inv.Snapshot()); got != 0 {
+		t.Fatalf("inventory size after Delete: want 0, got %d", got)
+	}
+
+	scan2, err := s.Scan(ctx)
+	if err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	second := diff.Compute(inv.Snapshot(), scan2)
+	if paths := orphanPaths(second.Orphaned); !equal(paths, []string{dir}) {
+		t.Errorf("scan 2 orphaned: want [%q], got %v", dir, paths)
+	}
+}
+
 // makeLocalPV is a small builder for a Local-volume PV pinned to
 // node by spec.nodeAffinity (kubernetes.io/hostname In).
 func makeLocalPV(name, path, node string) *corev1.PersistentVolume {
