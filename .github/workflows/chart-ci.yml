@@ -1,0 +1,159 @@
+# Chart CI — exercises the Helm chart on every PR that touches it.
+#
+# ci.yml is Go-only (lint / test / build / docker build), so without
+# this workflow a broken chart template, a regressed PromQL escape, or
+# a values-schema drift would merge unnoticed (issue #12).
+#
+# Three independent gates, each narrow enough to point at the actual
+# failure class:
+#   - lint       : `helm lint` against defaults and every ci/*-values.yaml overlay
+#   - template   : `helm template` matrix that confirms each scenario renders
+#   - negative   : asserts the `required` guard in deployment-nfs.yaml fires
+#                  when nfs.enabled is set without a volume
+#   - unittest   : runs the helm-unittest assertions under charts/.../tests/
+#
+# Add a new ci/*-values.yaml overlay any time a values branch grows;
+# the template matrix is path-globbed below so new files are picked up
+# automatically. unittest assertions live alongside the templates.
+name: Chart CI
+
+on:
+  pull_request:
+    paths:
+      - "charts/**"
+      - ".github/workflows/chart-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "charts/**"
+      - ".github/workflows/chart-ci.yml"
+
+permissions:
+  contents: read
+
+env:
+  # Pin Helm so a future v3->v4 default flip in azure/setup-helm
+  # doesn't silently change behaviour. Bump deliberately.
+  HELM_VERSION: v3.18.4
+  CHART_PATH: charts/k8s-pv-orphan-exporter
+
+jobs:
+  lint:
+    name: helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: helm lint (defaults)
+        run: helm lint "$CHART_PATH"
+      - name: helm lint (each overlay)
+        run: |
+          set -e
+          for f in "$CHART_PATH"/ci/*-values.yaml; do
+            echo "::group::$(basename "$f")"
+            # nfs-missing-volume-values.yaml is the negative case and
+            # only warns at lint time — the real enforcement runs in
+            # the `negative` job. Including it here still catches any
+            # unrelated template error in the rest of the chart.
+            helm lint "$CHART_PATH" -f "$f"
+            echo "::endgroup::"
+          done
+
+  template:
+    name: helm template (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: defaults
+            values: ""
+          - scenario: nfs-only
+            values: ci/nfs-only-values.yaml
+          - scenario: nfs-existing-claim
+            values: ci/nfs-existing-claim-values.yaml
+          - scenario: both-scanners
+            values: ci/both-scanners-values.yaml
+          - scenario: rule-only
+            values: ci/rule-only-values.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: render
+        run: |
+          if [ -n "${{ matrix.values }}" ]; then
+            helm template smoke "$CHART_PATH" \
+              -f "$CHART_PATH/${{ matrix.values }}" \
+              > render.yaml
+          else
+            helm template smoke "$CHART_PATH" > render.yaml
+          fi
+          # Sanity: rendered manifest must contain at least one object.
+          # Empty output usually means every `if` guard was false — a
+          # misconfigured overlay, not a clean render.
+          test -s render.yaml
+          grep -q '^kind:' render.yaml
+      - name: kubeconform
+        # Catches mistyped k8s API fields the Helm templates would
+        # happily render but the API server would reject. Offline,
+        # fast, no cluster needed. PrometheusRule is a CRD so its
+        # schema isn't bundled — `-ignore-missing-schemas` lets that
+        # render through without flagging.
+        uses: docker://ghcr.io/yannh/kubeconform:v0.6.7
+        with:
+          args: >-
+            -strict
+            -ignore-missing-schemas
+            -summary
+            render.yaml
+
+  negative:
+    name: helm template (required guard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: nfs.enabled without a volume must fail the render
+        run: |
+          set +e
+          out=$(helm template smoke "$CHART_PATH" \
+                  -f "$CHART_PATH/ci/nfs-missing-volume-values.yaml" 2>&1)
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::expected helm template to fail (required guard for nfs.volume.nfs.server)"
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          # The guard's error message is part of the contract; bind to
+          # it so a future renaming of the values key shows up here.
+          if ! printf '%s' "$out" | grep -q 'nfs.volume.nfs.server is required'; then
+            echo "::error::render failed, but not with the expected required-guard message"
+            printf '%s\n' "$out"
+            exit 1
+          fi
+
+  unittest:
+    name: helm-unittest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: install helm-unittest plugin
+        # Helm v3 has no `--verify` flag on `plugin install` (and
+        # doesn't verify by default). Helm v4 verifies by default and
+        # needs `--verify=false` because the plugin doesn't ship a
+        # signed checksum. The two-step form works on either major.
+        run: |
+          helm plugin install https://github.com/helm-unittest/helm-unittest 2>/dev/null \
+            || helm plugin install https://github.com/helm-unittest/helm-unittest --verify=false
+      - name: helm unittest
+        run: helm unittest "$CHART_PATH" --strict

@@ -1,0 +1,126 @@
+suite: NFS Deployment
+templates:
+  - deployment-nfs.yaml
+release:
+  name: smoke
+  namespace: monitoring
+tests:
+  - it: is omitted by default
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: renders with an inline NFS volume when enabled
+    set:
+      nfs:
+        enabled: true
+        server: nfs.example.internal
+        exportRoot: /exports/kube
+        mountPath: /mnt/nfs
+        volume:
+          nfs:
+            server: nfs.example.internal
+            path: /exports/kube
+    asserts:
+      - hasDocuments: { count: 1 }
+      - isKind: { of: Deployment }
+      - equal:
+          path: metadata.name
+          value: smoke-k8s-pv-orphan-exporter-nfs
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+      - equal:
+          path: spec.template.spec.volumes[0].nfs.server
+          value: nfs.example.internal
+      - equal:
+          path: spec.template.spec.volumes[0].nfs.path
+          value: /exports/kube
+      - equal:
+          path: spec.template.spec.volumes[0].nfs.readOnly
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /mnt/nfs
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].readOnly
+          value: true
+
+  - it: selector labels are the immutable triple (name+instance+component)
+    set:
+      nfs:
+        enabled: true
+        volume:
+          nfs:
+            server: nfs.example.internal
+            path: /exports/kube
+    asserts:
+      - isSubset:
+          path: spec.selector.matchLabels
+          content:
+            app.kubernetes.io/name: k8s-pv-orphan-exporter
+            app.kubernetes.io/instance: smoke
+            app.kubernetes.io/component: nfs-scanner
+      - notExists:
+          path: spec.selector.matchLabels["helm.sh/chart"]
+      - notExists:
+          path: spec.selector.matchLabels["app.kubernetes.io/version"]
+
+  - it: composes nfs-specific args (mount-path, server, export-root, archived-prefix)
+    set:
+      nfs:
+        enabled: true
+        mountPath: /mnt/nfs
+        server: nfs.example.internal
+        exportRoot: /exports/kube
+        archivedPrefix: archived-
+        excludes: ".snapshot,lost+found"
+        volume:
+          nfs:
+            server: nfs.example.internal
+            path: /exports/kube
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --scanner.nfs.enabled
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --scanner.nfs.mount-path=/mnt/nfs
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --scanner.nfs.server=nfs.example.internal
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --scanner.nfs.export-root=/exports/kube
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --scanner.nfs.archived-prefix=archived-
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --scanner.nfs.exclude=.snapshot,lost+found
+
+  - it: switches to existingClaim when configured
+    set:
+      nfs:
+        enabled: true
+        volume:
+          existingClaim: my-readonly-nfs-claim
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0].persistentVolumeClaim.claimName
+          value: my-readonly-nfs-claim
+      - equal:
+          path: spec.template.spec.volumes[0].persistentVolumeClaim.readOnly
+          value: true
+      - notExists:
+          path: spec.template.spec.volumes[0].nfs
+
+  - it: errors when nfs.enabled with no volume.nfs and no existingClaim
+    set:
+      nfs.enabled: true
+      # volume left empty
+    asserts:
+      - failedTemplate:
+          errorPattern: "nfs.volume.nfs.server is required"

@@ -1,0 +1,15 @@
+# NFS-only install: local-path DaemonSet off, NFS Deployment on with
+# an inline NFS volume. Exercises the in-tree path-rewrite knobs.
+localPath:
+  enabled: false
+
+nfs:
+  enabled: true
+  mountPath: /mnt/nfs
+  server: nfs.example.internal
+  exportRoot: /exports/kube
+  archivedPrefix: archived-
+  volume:
+    nfs:
+      server: nfs.example.internal
+      path: /exports/kube

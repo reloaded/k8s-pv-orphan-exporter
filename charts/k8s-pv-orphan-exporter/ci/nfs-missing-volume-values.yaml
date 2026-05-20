@@ -1,0 +1,10 @@
+# Negative case: nfs.enabled=true but neither volume.nfs.server/path
+# nor volume.existingClaim is provided. The `required` guard in
+# templates/deployment-nfs.yaml MUST fail the render; CI inverts the
+# exit code so this case PASSES when the render fails.
+localPath:
+  enabled: false
+
+nfs:
+  enabled: true
+  # volume left at defaults — empty server, empty path, no existingClaim.

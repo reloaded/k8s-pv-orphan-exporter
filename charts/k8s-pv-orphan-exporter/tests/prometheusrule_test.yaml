@@ -1,0 +1,99 @@
+suite: PrometheusRule
+templates:
+  - prometheusrule.yaml
+release:
+  name: smoke
+  namespace: monitoring
+tests:
+  - it: is omitted by default
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: renders all three alerts when enabled
+    set:
+      prometheusRule:
+        enabled: true
+        additionalLabels:
+          release: kube-prometheus-stack
+    asserts:
+      - hasDocuments: { count: 1 }
+      - isKind: { of: PrometheusRule }
+      - equal:
+          path: apiVersion
+          value: monitoring.coreos.com/v1
+      - equal:
+          path: spec.groups[0].name
+          value: k8s-pv-orphan-exporter
+      - lengthEqual:
+          path: spec.groups[0].rules
+          count: 3
+      - equal:
+          path: spec.groups[0].rules[0].alert
+          value: PVOrphanExporterScanStalled
+      - equal:
+          path: spec.groups[0].rules[1].alert
+          value: KubernetesDanglingPV
+      - equal:
+          path: spec.groups[0].rules[2].alert
+          value: KubernetesOrphanedStorageDirectories
+
+  - it: merges additionalLabels onto the rule object
+    set:
+      prometheusRule:
+        enabled: true
+        additionalLabels:
+          release: kube-prometheus-stack
+          role: alerting
+    asserts:
+      - equal:
+          path: metadata.labels["release"]
+          value: kube-prometheus-stack
+      - equal:
+          path: metadata.labels["role"]
+          value: alerting
+
+  - it: scanStalled threshold is configurable
+    set:
+      prometheusRule:
+        enabled: true
+        scanStalledThresholdSeconds: 600
+    asserts:
+      # The expr is a single string; matchRegex is the cheap way to
+      # assert the threshold landed inside it.
+      - matchRegex:
+          path: spec.groups[0].rules[0].expr
+          pattern: "> 600$"
+
+  - it: PromQL $labels placeholders survive helm rendering as literals
+    # Bug-class this guards: Helm consuming `{{ $labels.x }}` as its
+    # own template. The escape in templates/prometheusrule.yaml must
+    # keep it as a literal Prometheus token for the Operator to
+    # interpolate at alert-eval time.
+    set:
+      prometheusRule.enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.groups[0].rules[0].annotations.summary
+          pattern: "\\{\\{ \\$labels\\.backend \\}\\}"
+      - matchRegex:
+          path: spec.groups[0].rules[1].annotations.description
+          pattern: "\\{\\{ \\$labels\\.storageclass \\}\\}"
+      - matchRegex:
+          path: spec.groups[0].rules[2].annotations.description
+          pattern: "\\{\\{ \\$labels\\.node \\}\\}"
+
+  - it: individual alert toggles work
+    set:
+      prometheusRule:
+        enabled: true
+        rules:
+          scanStalled: false
+          danglingPV: true
+          orphanedDirectories: false
+    asserts:
+      - lengthEqual:
+          path: spec.groups[0].rules
+          count: 1
+      - equal:
+          path: spec.groups[0].rules[0].alert
+          value: KubernetesDanglingPV
