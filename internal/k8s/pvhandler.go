@@ -35,7 +35,21 @@ import (
 // remains visible at the call site.
 func RegisterPVHandler(factory informers.SharedInformerFactory, inv *inventory.Inventory, cfg inventory.Config) error {
 	informer := factory.Core().V1().PersistentVolumes().Informer()
-	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	if _, err := informer.AddEventHandler(pvEventHandlers(inv, cfg)); err != nil {
+		return fmt.Errorf("register PV handler: %w", err)
+	}
+	return nil
+}
+
+// pvEventHandlers returns the Add/Update/Delete handler funcs that
+// translate PV informer events into inventory mutations. It is
+// factored out of RegisterPVHandler so the tombstone-unwrap path on
+// Delete can be unit-tested without orchestrating a fake-clientset
+// relist (fake.NewClientset's informer always delivers Delete with
+// the real *PersistentVolume, never a cache.DeletedFinalStateUnknown
+// — only a real apiserver/watch interruption produces tombstones).
+func pvEventHandlers(inv *inventory.Inventory, cfg inventory.Config) cache.ResourceEventHandlerFuncs {
+	return cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if pv, ok := obj.(*corev1.PersistentVolume); ok {
 				inv.Set(inventory.FromPV(pv, cfg))
@@ -58,9 +72,5 @@ func RegisterPVHandler(factory informers.SharedInformerFactory, inv *inventory.I
 				inv.Delete(pv.Name)
 			}
 		},
-	})
-	if err != nil {
-		return fmt.Errorf("register PV handler: %w", err)
 	}
-	return nil
 }
