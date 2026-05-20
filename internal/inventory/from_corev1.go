@@ -105,22 +105,34 @@ func FromPV(pv *corev1.PersistentVolume, cfg Config) PVRef {
 		ref.ExpectedPaths = expand(pv.Spec.Local.Path, nodesFromAffinity(pv.Spec.NodeAffinity))
 	case pv.Spec.HostPath != nil:
 		ref.Backend = BackendLocalPath
-		ref.ExpectedPaths = []ExpectedPath{{Path: pv.Spec.HostPath.Path}}
+		ref.ExpectedPaths = []ExpectedPath{{Path: cleanPath(pv.Spec.HostPath.Path)}}
 	case pv.Spec.NFS != nil:
 		ref.Backend = BackendNFS
 		if p, ok := cfg.NFS.resolveInTree(pv.Spec.NFS.Server, pv.Spec.NFS.Path); ok {
-			ref.ExpectedPaths = []ExpectedPath{{Path: p}}
+			ref.ExpectedPaths = []ExpectedPath{{Path: cleanPath(p)}}
 		}
 	case pv.Spec.CSI != nil && pv.Spec.CSI.Driver == "nfs.csi.k8s.io":
 		ref.Backend = BackendNFS
 		attrs := pv.Spec.CSI.VolumeAttributes
 		if p, ok := cfg.NFS.resolveCSI(attrs["server"], attrs["subDir"]); ok {
-			ref.ExpectedPaths = []ExpectedPath{{Path: p}}
+			ref.ExpectedPaths = []ExpectedPath{{Path: cleanPath(p)}}
 		}
 	default:
 		ref.Backend = BackendUnknown
 	}
 	return ref
+}
+
+// cleanPath normalises a path with filepath.Clean. Empty stays empty
+// — letting Clean turn "" into "." would slip past the diff engine's
+// root-prefix filter and could false-flag the scanner's cwd. An
+// empty ExpectedPath.Path means "the PV gave us nothing usable" and
+// is correctly dropped upstream.
+func cleanPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	return filepath.Clean(p)
 }
 
 // resolveInTree maps an in-tree NFS PV's (server, server-side path) to
@@ -239,9 +251,10 @@ func expand(path string, nodes []string) []ExpectedPath {
 	if len(nodes) == 0 {
 		return nil
 	}
+	cleaned := cleanPath(path)
 	out := make([]ExpectedPath, 0, len(nodes))
 	for _, n := range nodes {
-		out = append(out, ExpectedPath{Node: n, Path: path})
+		out = append(out, ExpectedPath{Node: n, Path: cleaned})
 	}
 	return out
 }

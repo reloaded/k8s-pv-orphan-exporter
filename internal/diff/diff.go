@@ -123,11 +123,22 @@ func Compute(pvs []inventory.PVRef, scan *scanner.ScanResult) Result {
 			if scan.Node != "" && ep.Node != "" && ep.Node != scan.Node {
 				continue
 			}
-			if !pathUnderRoots(ep.Path, scan.Roots) {
+			// Clean the expected path before matching against
+			// scanner-observed entries — those are emitted via
+			// filepath.Join (already clean). Belt-and-braces vs
+			// the FromPV-side normalisation so a trailing-slash
+			// PV spec still matches its scanned dir (issue #5).
+			// Original ep is kept on the DanglingPV record so
+			// operators see the raw value they configured.
+			epPath := ep.Path
+			if epPath != "" {
+				epPath = filepath.Clean(epPath)
+			}
+			if !pathUnderRoots(epPath, scan.Roots) {
 				continue
 			}
-			expected[ep.Path] = struct{}{}
-			if _, ok := observed[ep.Path]; !ok {
+			expected[epPath] = struct{}{}
+			if _, ok := observed[epPath]; !ok {
 				res.Dangling = append(res.Dangling, DanglingPV{
 					PV:           pv,
 					ExpectedPath: ep,
@@ -198,18 +209,28 @@ func hasAncestorInSet(path string, set map[string]struct{}) bool {
 // roots, treating an empty roots list as "no filter" (any path
 // passes). Match is by path-component, so /opt/lpp does not match
 // /opt/lppextra.
+//
+// Inputs are filepath.Cleaned defensively so a trailing-slash /
+// double-slash variant on either side still matches (issue #5).
+// Empty path stays empty rather than being turned into "." by Clean
+// — callers use "" to mean "no usable path" and the prefix check
+// already drops it.
 func pathUnderRoots(path string, roots []string) bool {
 	if len(roots) == 0 {
 		return true
 	}
+	if path != "" {
+		path = filepath.Clean(path)
+	}
 	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		root = filepath.Clean(root)
 		if path == root {
 			return true
 		}
-		if !strings.HasSuffix(root, "/") {
-			root += "/"
-		}
-		if strings.HasPrefix(path, root) {
+		if strings.HasPrefix(path, root+"/") {
 			return true
 		}
 	}
