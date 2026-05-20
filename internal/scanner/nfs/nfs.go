@@ -110,7 +110,11 @@ func (s *Scanner) Scan(ctx context.Context) (*scanner.ScanResult, error) {
 	if s.cfg.MountPath == "" {
 		return result, nil
 	}
-	result.Roots = []string{s.cfg.MountPath}
+	// Clean the mount path so the diff engine's prefix check is
+	// trailing-slash / double-slash agnostic (issue #5). The walk
+	// itself still runs against the operator-supplied path so any
+	// permissions/lstat errors reference the exact value they set.
+	result.Roots = []string{filepath.Clean(s.cfg.MountPath)}
 
 	if err := ctx.Err(); err != nil {
 		return nil, err

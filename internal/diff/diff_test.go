@@ -201,6 +201,32 @@ func TestCompute(t *testing.T) {
 				entry("/opt/lpp/pvc-stray/data", false)),
 			wantO: []string{"/opt/lpp/pvc-stray"},
 		},
+		{
+			// Issue #5 acceptance: a PV whose ExpectedPath has a
+			// trailing slash must still match the scanner-observed
+			// entry (which is always Clean via filepath.Join).
+			// Without the defensive Clean in Compute this would
+			// false-flag both dangling AND orphan.
+			name: "trailing-slash expected path matches Clean observed entry",
+			pvs: []inventory.PVRef{
+				pv("pv-slashy", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/opt/lpp/pv-slashy/")),
+			},
+			scan: scanResult("local-path", "node-1",
+				entry("/opt/lpp/pv-slashy", false)),
+		},
+		{
+			// Same shape but trailing-slash on a scanner Root —
+			// the diff engine should still treat it as the same
+			// component-boundary as a Clean root.
+			name: "trailing-slash root is component-boundary equivalent",
+			pvs: []inventory.PVRef{
+				pv("pv-rooty", inventory.BackendLocalPath, "Bound", "Delete",
+					expected("node-1", "/opt/lpp/pv-rooty")),
+			},
+			scan: scanResultWithRoots("local-path", "node-1", []string{"/opt/lpp/"},
+				entry("/opt/lpp/pv-rooty", false)),
+		},
 	}
 
 	for _, tc := range tests {
