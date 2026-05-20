@@ -37,8 +37,12 @@ fi
 echo "==> Installing Helm plugins (helm-unittest)"
 if command -v helm >/dev/null 2>&1; then
   if ! helm plugin list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx unittest; then
-    helm plugin install https://github.com/helm-unittest/helm-unittest --verify=false || \
-      echo "WARN: helm-unittest install failed (skipping)"
+    # Helm v3 has no `--verify` on `plugin install`; v4 verifies by
+    # default and needs `--verify=false` for this unsigned plugin.
+    # Two-step works on either major.
+    helm plugin install https://github.com/helm-unittest/helm-unittest 2>/dev/null \
+      || helm plugin install https://github.com/helm-unittest/helm-unittest --verify=false \
+      || echo "WARN: helm-unittest install failed (skipping)"
   fi
 else
   echo "WARN: helm not on PATH yet — devcontainer feature kubectl-helm-minikube should provide it."

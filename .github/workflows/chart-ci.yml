@@ -148,8 +148,12 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
       - name: install helm-unittest plugin
-        # The plugin doesn't ship a signed checksum; --verify=false is
-        # the documented install path.
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest --verify=false
+        # Helm v3 has no `--verify` flag on `plugin install` (and
+        # doesn't verify by default). Helm v4 verifies by default and
+        # needs `--verify=false` because the plugin doesn't ship a
+        # signed checksum. The two-step form works on either major.
+        run: |
+          helm plugin install https://github.com/helm-unittest/helm-unittest 2>/dev/null \
+            || helm plugin install https://github.com/helm-unittest/helm-unittest --verify=false
       - name: helm unittest
         run: helm unittest "$CHART_PATH" --strict
