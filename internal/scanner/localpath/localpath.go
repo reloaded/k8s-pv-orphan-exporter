@@ -103,7 +103,9 @@ func (s *Scanner) Scan(ctx context.Context) (*scanner.ScanResult, error) {
 	result := &scanner.ScanResult{
 		Backend: Backend,
 		Node:    s.cfg.NodeName,
-		Roots:   append([]string(nil), s.cfg.StorageRoots...),
+		// Clean each root so the diff engine's prefix check is
+		// trailing-slash / double-slash agnostic (issue #5).
+		Roots: cleanRoots(s.cfg.StorageRoots),
 	}
 
 	for _, root := range s.cfg.StorageRoots {
@@ -220,6 +222,23 @@ func (s *Scanner) walk(
 		}
 	}
 	return nil
+}
+
+// cleanRoots returns a Cleaned copy of roots (filepath.Clean each
+// non-empty entry; empty entries are dropped so callers can't be
+// surprised by Clean("")==".").
+func cleanRoots(roots []string) []string {
+	if len(roots) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r == "" {
+			continue
+		}
+		out = append(out, filepath.Clean(r))
+	}
+	return out
 }
 
 func excludeSet(exclude []string) map[string]struct{} {

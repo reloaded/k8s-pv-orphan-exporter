@@ -159,6 +159,78 @@ func TestFromPV(t *testing.T) {
 	}
 }
 
+// TestFromPV_PathNormalisation covers issue #5: every ExpectedPath
+// must be filepath.Cleaned at the boundary so a slightly different
+// raw form on either side of the diff doesn't lose the match.
+func TestFromPV_PathNormalisation(t *testing.T) {
+	const want = "/opt/lpp/foo"
+	rawForms := []string{
+		"/opt/lpp/foo",        // canonical
+		"/opt/lpp//foo",       // double slash
+		"/opt/lpp/foo/",       // trailing slash
+		"/opt/lpp/./foo",      // redundant cwd segment
+		"/opt/lpp/bar/../foo", // up-traversal that lands on the same path
+	}
+
+	for _, raw := range rawForms {
+		t.Run("local "+raw, func(t *testing.T) {
+			pv := pvBuilder("pv-local", corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					Local: &corev1.LocalVolumeSource{Path: raw},
+				},
+				NodeAffinity: hostnameAffinity("node-1"),
+			})
+			got := inventory.FromPV(pv, inventory.Config{})
+			if !equalExpected([]inventory.ExpectedPath{{Node: "node-1", Path: want}}, got.ExpectedPaths) {
+				t.Errorf("Local PV %q: ExpectedPaths %v, want path %q", raw, got.ExpectedPaths, want)
+			}
+		})
+		t.Run("hostPath "+raw, func(t *testing.T) {
+			pv := pvBuilder("pv-host", corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					HostPath: &corev1.HostPathVolumeSource{Path: raw},
+				},
+			})
+			got := inventory.FromPV(pv, inventory.Config{})
+			if !equalExpected([]inventory.ExpectedPath{{Path: want}}, got.ExpectedPaths) {
+				t.Errorf("hostPath PV %q: ExpectedPaths %v, want path %q", raw, got.ExpectedPaths, want)
+			}
+		})
+	}
+
+	// NFS in-tree: server-side path with messy form must Clean
+	// before the export-root strip + mount join produce the
+	// scanner-observable path.
+	pvNFS := pvBuilder("pv-nfs", corev1.PersistentVolumeSpec{
+		PersistentVolumeSource: corev1.PersistentVolumeSource{
+			NFS: &corev1.NFSVolumeSource{Server: "nfs.example", Path: "/export/k8s/team-a/pvc-1/"},
+		},
+	})
+	gotNFS := inventory.FromPV(pvNFS, inventory.Config{NFS: inventory.NFSConfig{
+		MountPath: "/mnt/nfs", ExportRoot: "/export/k8s",
+	}})
+	if !equalExpected([]inventory.ExpectedPath{{Path: "/mnt/nfs/team-a/pvc-1"}}, gotNFS.ExpectedPaths) {
+		t.Errorf("in-tree NFS trailing-slash: ExpectedPaths %v", gotNFS.ExpectedPaths)
+	}
+
+	// CSI subDir: messy subDir form, same canonical result.
+	pvCSI := pvBuilder("pv-csi", corev1.PersistentVolumeSpec{
+		PersistentVolumeSource: corev1.PersistentVolumeSource{
+			CSI: &corev1.CSIPersistentVolumeSource{
+				Driver: "nfs.csi.k8s.io",
+				VolumeAttributes: map[string]string{
+					"server": "nfs.example",
+					"subDir": "team-a//pvc-1/",
+				},
+			},
+		},
+	})
+	gotCSI := inventory.FromPV(pvCSI, inventory.Config{NFS: inventory.NFSConfig{MountPath: "/mnt/nfs"}})
+	if !equalExpected([]inventory.ExpectedPath{{Path: "/mnt/nfs/team-a/pvc-1"}}, gotCSI.ExpectedPaths) {
+		t.Errorf("CSI subDir messy: ExpectedPaths %v", gotCSI.ExpectedPaths)
+	}
+}
+
 func TestFromPV_ClaimAndStatus(t *testing.T) {
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pv-x"},
