@@ -1,0 +1,81 @@
+# Goreleaser config — binary archives, checksums, and a GitHub
+# Release on every `v*` tag (design.md §12 Phase 4). The container
+# image is published separately by .github/workflows/release.yml; we
+# deliberately don't publish docker from here to avoid two pipelines
+# racing for the same tag.
+
+version: 2
+project_name: k8s-pv-orphan-exporter
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: k8s-pv-orphan-exporter
+    main: ./cmd/k8s-pv-orphan-exporter
+    binary: k8s-pv-orphan-exporter
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    # ldflags must match the -X targets in internal/version. Keep in
+    # sync with release.yml's Dockerfile build-args; the same var
+    # names are exported there for the container build.
+    ldflags:
+      - -s -w
+      - -X github.com/reloaded/k8s-pv-orphan-exporter/internal/version.Version={{ .Version }}
+      - -X github.com/reloaded/k8s-pv-orphan-exporter/internal/version.Revision={{ .ShortCommit }}
+      - -X github.com/reloaded/k8s-pv-orphan-exporter/internal/version.Branch={{ .Branch }}
+      - -X github.com/reloaded/k8s-pv-orphan-exporter/internal/version.BuildDate={{ .Date }}
+
+archives:
+  - id: default
+    # tar.gz everywhere — no Windows build, no zip needed.
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  # `goreleaser release --snapshot` for local dry-runs.
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  # Use GitHub's auto-generated release notes shape. The repo's
+  # commit messages are imperative-style, not conventional-commits,
+  # so we don't pre-group; let GitHub render the PR list and let the
+  # default sort keep things in tag order.
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: reloaded
+    name: k8s-pv-orphan-exporter
+  draft: false
+  # `prerelease: auto` -> any tag like vX.Y.Z-rc1 is marked prerelease.
+  prerelease: auto
+  name_template: "{{ .ProjectName }} {{ .Tag }}"
+  footer: |
+    ---
+
+    Container image for the same tag is published separately by
+    [release.yml](.github/workflows/release.yml) to
+    `ghcr.io/reloaded/k8s-pv-orphan-exporter:{{ .Tag }}` (and
+    `:latest`, `:sha-<short>`).
