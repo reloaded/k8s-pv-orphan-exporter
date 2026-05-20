@@ -1,0 +1,12 @@
+# NFS Deployment backed by an existing PVC rather than an inline NFS
+# volume. The `existingClaim` branch of the volume template.
+localPath:
+  enabled: false
+
+nfs:
+  enabled: true
+  mountPath: /mnt/nfs
+  server: nfs.example.internal
+  exportRoot: /exports/kube
+  volume:
+    existingClaim: my-readonly-nfs-claim

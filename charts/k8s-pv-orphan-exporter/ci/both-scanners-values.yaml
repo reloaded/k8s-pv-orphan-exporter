@@ -1,0 +1,20 @@
+# Both backends + PrometheusRule on. Renders every template at once;
+# the kitchen-sink check that nothing collides on labels/names.
+localPath:
+  enabled: true
+
+nfs:
+  enabled: true
+  mountPath: /mnt/nfs
+  server: nfs.example.internal
+  exportRoot: /exports/kube
+  volume:
+    nfs:
+      server: nfs.example.internal
+      path: /exports/kube
+
+prometheusRule:
+  enabled: true
+  additionalLabels:
+    release: kube-prometheus-stack
+  scanStalledThresholdSeconds: 1800

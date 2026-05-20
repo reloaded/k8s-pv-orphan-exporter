@@ -121,3 +121,38 @@ See [`docs/design.md`](../../docs/design.md) for the architecture and
 ## Values
 
 See [`values.yaml`](./values.yaml) — every key is commented inline.
+
+## Validating the chart locally
+
+CI runs the same checks in [`.github/workflows/chart-ci.yml`](../../.github/workflows/chart-ci.yml).
+The devcontainer ships Helm; install the `helm-unittest` plugin once:
+
+```bash
+helm plugin install https://github.com/helm-unittest/helm-unittest --verify=false
+```
+
+Then from the repo root:
+
+```bash
+# Lint defaults + every values overlay under ci/.
+helm lint charts/k8s-pv-orphan-exporter
+for f in charts/k8s-pv-orphan-exporter/ci/*-values.yaml; do
+  helm lint charts/k8s-pv-orphan-exporter -f "$f"
+done
+
+# Render each scenario (defaults plus the ci/ overlays).
+helm template smoke charts/k8s-pv-orphan-exporter
+for f in charts/k8s-pv-orphan-exporter/ci/*-values.yaml; do
+  # nfs-missing-volume-values.yaml is the negative case; it MUST fail.
+  helm template smoke charts/k8s-pv-orphan-exporter -f "$f"
+done
+
+# Run the helm-unittest assertions.
+helm unittest charts/k8s-pv-orphan-exporter --strict
+```
+
+`ci/*-values.yaml` overlays cover the realistic install topologies
+(defaults, NFS only, NFS via existingClaim, both scanners, rule only)
+plus the negative `required`-guard case. `tests/*_test.yaml` pin
+template-level invariants (selector immutability, args composition,
+PromQL `{{ $labels.* }}` literal escaping, RBAC read-only verbs).

@@ -1,0 +1,13 @@
+# Neither scanner enabled, only the PrometheusRule. A weird but valid
+# state — covers e.g. an umbrella chart that installs the rule beside
+# a separately-managed exporter pod.
+localPath:
+  enabled: false
+
+nfs:
+  enabled: false
+
+prometheusRule:
+  enabled: true
+  additionalLabels:
+    release: kube-prometheus-stack

@@ -31,4 +31,17 @@ if [ -f "$WORKSPACE_DIR/go.mod" ]; then
   (cd "$WORKSPACE_DIR" && go mod download)
 fi
 
+# helm-unittest is invoked by .github/workflows/chart-ci.yml; installing
+# it here lets contributors run the same `helm unittest` locally that
+# CI runs.
+echo "==> Installing Helm plugins (helm-unittest)"
+if command -v helm >/dev/null 2>&1; then
+  if ! helm plugin list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx unittest; then
+    helm plugin install https://github.com/helm-unittest/helm-unittest --verify=false || \
+      echo "WARN: helm-unittest install failed (skipping)"
+  fi
+else
+  echo "WARN: helm not on PATH yet — devcontainer feature kubectl-helm-minikube should provide it."
+fi
+
 echo "==> Done. Run 'go build ./...' or 'make' to get started."

@@ -1,0 +1,79 @@
+suite: Services (local-path + NFS)
+templates:
+  - service-localpath.yaml
+  - service-nfs.yaml
+release:
+  name: smoke
+  namespace: monitoring
+tests:
+  - it: local-path Service renders by default and is headless
+    template: service-localpath.yaml
+    asserts:
+      - hasDocuments: { count: 1 }
+      - isKind: { of: Service }
+      - equal:
+          path: metadata.name
+          value: smoke-k8s-pv-orphan-exporter-local-path
+      # Headless: one DNS A record per pod, the right shape for
+      # per-DaemonSet-pod scraping (see chart README).
+      - equal:
+          path: spec.clusterIP
+          value: "None"
+      - equal:
+          path: spec.ports[0].port
+          value: 9877
+      - equal:
+          path: spec.ports[0].targetPort
+          value: metrics
+      - isSubset:
+          path: spec.selector
+          content:
+            app.kubernetes.io/name: k8s-pv-orphan-exporter
+            app.kubernetes.io/instance: smoke
+            app.kubernetes.io/component: local-path-scanner
+
+  - it: local-path Service is omitted when localPath disabled
+    template: service-localpath.yaml
+    set:
+      localPath.enabled: false
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: NFS Service is omitted by default
+    template: service-nfs.yaml
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: NFS Service renders when nfs.enabled with a clusterIP type
+    template: service-nfs.yaml
+    set:
+      nfs:
+        enabled: true
+        volume:
+          existingClaim: any
+    asserts:
+      - hasDocuments: { count: 1 }
+      - isKind: { of: Service }
+      - equal:
+          path: metadata.name
+          value: smoke-k8s-pv-orphan-exporter-nfs
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - notExists:
+          path: spec.clusterIP
+      - isSubset:
+          path: spec.selector
+          content:
+            app.kubernetes.io/name: k8s-pv-orphan-exporter
+            app.kubernetes.io/instance: smoke
+            app.kubernetes.io/component: nfs-scanner
+
+  - it: listenPort propagates from values into Service ports
+    template: service-localpath.yaml
+    set:
+      listenPort: 19877
+    asserts:
+      - equal:
+          path: spec.ports[0].port
+          value: 19877
